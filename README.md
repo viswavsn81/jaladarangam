@@ -75,3 +75,24 @@ so the 100kΩ pulldown gives a clean, defined idle reading instead of a floating
   kept as a reference/fallback trigger while the sensor wiring above is being built out.
 - `samples/guitar_note.wav` — CC0 guitar sample from OpenGameArt.org
   (https://opengameart.org/content/guitar-0), used by the spacebar PoC.
+- `read_fsr_raw.py` — prints raw MCP3008 readings for a channel; used to verify a
+  sensor's wiring/divider orientation before building anything on top of it.
+- `fsr_oscillator.py` — maps FSR1 (CH0) and FSR2 (CH1) each to a persistent sine
+  oscillator (pygame.mixer, 48000Hz/1024-sample buffer) whose pitch tracks pressure;
+  an interface-level proof of concept, not the final instrument sound.
+- `gamaka.py` — the pressure-controlled pitch-bend (gamaka) proof of concept. FSR1
+  triggers/bends a D3 guitar pluck, FSR2 triggers/bends a G3 pluck. Samples are
+  streamed through a `sounddevice` callback with a variable-rate linear-interpolation
+  reader per voice (pygame.mixer can't vary playback speed live, hence the different
+  library here vs. the oscillator above). Raw ADC is EMA-smoothed before driving the
+  bend; a fresh pluck triggers on the raw touch-threshold crossing, and the bend
+  (0 to +40 cents, `rate = 2^(cents/1200)`) tracks the smoothed value continuously,
+  including after release, so pitch settles back down instead of snapping.
+- `prepare_samples.py` — one-time preprocessing script that derived `d3_pluck.wav`
+  and `g3_pluck.wav` from the source samples below.
+- `samples/d3_pluck.wav`, `samples/g3_pluck.wav` — derived from
+  [`karoryfer.shinyguitar`](https://github.com/sfzinstruments/karoryfer.shinyguitar)
+  (CC0 1.0, verified directly against the repo's `LICENSE` file). That library samples
+  in whole tones rather than every semitone, so D3 and G3 aren't recorded directly —
+  they're derived from the nearest neighbors (Eb3 and Gb3) via a 1-semitone pitch
+  shift, resampled to 48000Hz to match this Pi's PipeWire audio graph quantum.
