@@ -1,0 +1,190 @@
+{
+  "_meta": {
+    "description": "Carnatic raga corpus: arohanam/avarohanam swara sequences for the 5-key sliding-window prototype. arohanam and avarohanam are stored as independent lists - avarohanam is NOT derived by reversing arohanam, since vakra ragas use different notes and/or a different note count in each direction.",
+    "swara_semitones": {
+      "S": 0, "R1": 1, "R2": 2, "G2": 3, "G3": 4, "M1": 5, "M2": 6,
+      "P": 7, "D1": 8, "D2": 9, "N2": 10, "N3": 11
+    },
+    "swara_semitones_note": "Offsets in semitones from Sa (tonic), standard 72-melakarta swarasthana numbering. R2/G2 (2/3) and D2/N2 (9/10) are the commonly-used chatushruti/kaisiki variants; enharmonic alternates (R3=G2, G1=R2, D3=N2, N1=D2) are not separately represented here since no raga in this corpus uses the alternate spelling.",
+    "sources": [
+      "https://www.ragasurabhi.com/carnatic-music/ragas.html (raga selection reference only - no text or audio copied from this site)",
+      "Cross-checked per-raga against Wikipedia Carnatic raga articles and independent Carnatic-music reference pages/blogs; see verification notes below",
+      "gamaka.py's own precedent: measure real pitch from real audio rather than assume standard tuning - the guitar placeholder samples follow the same principle"
+    ],
+    "verification_note": "Every raga below was cross-referenced against at least one source independent of ragasurabhi.com before inclusion. Two corrections were caught by this process: Suddha Saveri's parent melakarta (Shankarabharanam, not Harikambhoji as initially assumed) and Bhoopalam's parent melakarta (Hanumatodi, not Mayamalavagowla as initially assumed)."
+  },
+  "ragas": [
+    {
+      "name": "Mayamalavagowla",
+      "melakarta_number": 15,
+      "is_janya": false,
+      "vakra": false,
+      "arohanam": ["S", "R1", "G3", "M1", "P", "D1", "N3", "S"],
+      "avarohanam": ["S", "N3", "D1", "P", "M1", "G3", "R1", "S"]
+    },
+    {
+      "name": "Shankarabharanam",
+      "melakarta_number": 29,
+      "is_janya": false,
+      "vakra": false,
+      "arohanam": ["S", "R2", "G3", "M1", "P", "D2", "N3", "S"],
+      "avarohanam": ["S", "N3", "D2", "P", "M1", "G3", "R2", "S"]
+    },
+    {
+      "name": "Kalyani",
+      "melakarta_number": 65,
+      "is_janya": false,
+      "vakra": false,
+      "arohanam": ["S", "R2", "G3", "M2", "P", "D2", "N3", "S"],
+      "avarohanam": ["S", "N3", "D2", "P", "M2", "G3", "R2", "S"]
+    },
+    {
+      "name": "Kharaharapriya",
+      "melakarta_number": 22,
+      "is_janya": false,
+      "vakra": false,
+      "arohanam": ["S", "R2", "G2", "M1", "P", "D2", "N2", "S"],
+      "avarohanam": ["S", "N2", "D2", "P", "M1", "G2", "R2", "S"]
+    },
+    {
+      "name": "Todi",
+      "aliases": ["Hanumatodi"],
+      "melakarta_number": 8,
+      "is_janya": false,
+      "vakra": false,
+      "arohanam": ["S", "R1", "G2", "M1", "P", "D1", "N2", "S"],
+      "avarohanam": ["S", "N2", "D1", "P", "M1", "G2", "R1", "S"]
+    },
+    {
+      "name": "Natabhairavi",
+      "melakarta_number": 20,
+      "is_janya": false,
+      "vakra": false,
+      "arohanam": ["S", "R2", "G2", "M1", "P", "D1", "N2", "S"],
+      "avarohanam": ["S", "N2", "D1", "P", "M1", "G2", "R2", "S"]
+    },
+    {
+      "name": "Mohanam",
+      "melakarta_parent": 28,
+      "melakarta_parent_name": "Harikambhoji",
+      "is_janya": true,
+      "vakra": false,
+      "arohanam": ["S", "R2", "G3", "P", "D2", "S"],
+      "avarohanam": ["S", "D2", "P", "G3", "R2", "S"]
+    },
+    {
+      "name": "Hamsadhwani",
+      "melakarta_parent": 29,
+      "melakarta_parent_name": "Shankarabharanam",
+      "is_janya": true,
+      "vakra": false,
+      "arohanam": ["S", "R2", "G3", "P", "N3", "S"],
+      "avarohanam": ["S", "N3", "P", "G3", "R2", "S"]
+    },
+    {
+      "name": "Hindolam",
+      "melakarta_parent": 20,
+      "melakarta_parent_name": "Natabhairavi",
+      "is_janya": true,
+      "vakra": false,
+      "arohanam": ["S", "G2", "M1", "D1", "N2", "S"],
+      "avarohanam": ["S", "N2", "D1", "M1", "G2", "S"]
+    },
+    {
+      "name": "Madhyamavati",
+      "melakarta_parent": 22,
+      "melakarta_parent_name": "Kharaharapriya",
+      "is_janya": true,
+      "vakra": false,
+      "arohanam": ["S", "R2", "M1", "P", "N2", "S"],
+      "avarohanam": ["S", "N2", "P", "M1", "R2", "S"]
+    },
+    {
+      "name": "Suddha Saveri",
+      "melakarta_parent": 29,
+      "melakarta_parent_name": "Shankarabharanam",
+      "is_janya": true,
+      "vakra": false,
+      "arohanam": ["S", "R2", "M1", "P", "D2", "S"],
+      "avarohanam": ["S", "D2", "P", "M1", "R2", "S"]
+    },
+    {
+      "name": "Abhogi",
+      "melakarta_parent": 22,
+      "melakarta_parent_name": "Kharaharapriya",
+      "is_janya": true,
+      "vakra": false,
+      "arohanam": ["S", "R2", "G2", "M1", "D2", "S"],
+      "avarohanam": ["S", "D2", "M1", "G2", "R2", "S"]
+    },
+    {
+      "name": "Shivaranjani",
+      "melakarta_parent": 22,
+      "melakarta_parent_name": "Kharaharapriya",
+      "is_janya": true,
+      "vakra": false,
+      "arohanam": ["S", "R2", "G2", "P", "D2", "S"],
+      "avarohanam": ["S", "D2", "P", "G2", "R2", "S"]
+    },
+    {
+      "name": "Bhoopalam",
+      "aliases": ["Bhupalam"],
+      "melakarta_parent": 8,
+      "melakarta_parent_name": "Hanumatodi",
+      "is_janya": true,
+      "vakra": false,
+      "arohanam": ["S", "R1", "G2", "P", "D1", "S"],
+      "avarohanam": ["S", "D1", "P", "G2", "R1", "S"]
+    },
+    {
+      "name": "Bhairavi",
+      "melakarta_parent": 20,
+      "melakarta_parent_name": "Natabhairavi",
+      "is_janya": true,
+      "vakra": true,
+      "vakra_note": "Bhashanga raga - uses D2 ascending but D1 descending, a note foreign to the parent melakarta appearing only in avarohanam.",
+      "arohanam": ["S", "R2", "G2", "M1", "P", "D2", "N2", "S"],
+      "avarohanam": ["S", "N2", "D1", "P", "M1", "G2", "R2", "S"]
+    },
+    {
+      "name": "Kambhoji",
+      "melakarta_parent": 28,
+      "melakarta_parent_name": "Harikambhoji",
+      "is_janya": true,
+      "vakra": true,
+      "vakra_note": "Shadava ascending (N omitted), sampoorna descending - different note count in each direction, not a simple reversal.",
+      "arohanam": ["S", "R2", "G3", "M1", "P", "D2", "S"],
+      "avarohanam": ["S", "N2", "D2", "P", "M1", "G3", "R2", "S"]
+    },
+    {
+      "name": "Bilahari",
+      "melakarta_parent": 29,
+      "melakarta_parent_name": "Shankarabharanam",
+      "is_janya": true,
+      "vakra": true,
+      "vakra_note": "Audava ascending (M and N omitted), sampoorna descending - different note count in each direction.",
+      "arohanam": ["S", "R2", "G3", "P", "D2", "S"],
+      "avarohanam": ["S", "N3", "D2", "P", "M1", "G3", "R2", "S"]
+    },
+    {
+      "name": "Saveri",
+      "melakarta_parent": 15,
+      "melakarta_parent_name": "Mayamalavagowla",
+      "is_janya": true,
+      "vakra": true,
+      "vakra_note": "Audava-sampoorna: G and N are entirely absent ascending but present descending (G3, N3), not merely reordered.",
+      "arohanam": ["S", "R1", "M1", "P", "D1", "S"],
+      "avarohanam": ["S", "N3", "D1", "P", "M1", "G3", "R1", "S"]
+    },
+    {
+      "name": "Malahari",
+      "melakarta_parent": 15,
+      "melakarta_parent_name": "Mayamalavagowla",
+      "is_janya": true,
+      "vakra": true,
+      "vakra_note": "Audava ascending (G and N omitted), shadava descending (G3 present, N still omitted) - asymmetric note count and note set.",
+      "arohanam": ["S", "R1", "M1", "P", "D1", "S"],
+      "avarohanam": ["S", "D1", "P", "M1", "G3", "R1", "S"]
+    }
+  ]
+}
