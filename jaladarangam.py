@@ -1,21 +1,35 @@
 #!/usr/bin/env python3
 """jaladarangam.py - the real hardware-driven instrument: 8 physical FSR
-note keys on a single MCP3008 (raga-selectable positional layout, ported
-from sliding_window_raga.py/gamaka_keyboard_mixer.py), mandolin/guitar/
-flute instrument switching, the double bass drone, the live 3-band EQ,
-and dual I2S+headphone output.
+note keys on one MCP3008 (ADC1, raga-selectable positional layout, ported
+from sliding_window_raga.py/gamaka_keyboard_mixer.py) plus 3 physical FSR
+control keys (gamakam, octave+, octave-) read by an Arduino Nano 33 BLE
+over USB serial, mandolin/guitar/flute instrument switching, the double
+bass drone, the live 3-band EQ, and dual I2S+headphone output.
 
-All 8 keys (CH0..CH7) are physically wired with real FSRs. No vibration
-motors in this build (see key_press.py for that, on its own throwaway
-test rig - unrelated to this instrument's hardware). A second MCP3008 for
-future gamakam/octave keys exists only in the design, not in hardware,
-and is not referenced here.
+All 8 ADC1 keys (CH0..CH7) and all 3 Nano control keys (A0/A1/A2) are
+physically wired with real FSRs - no keyboard stand-ins remain. No
+vibration motors in this build (see key_press.py for that, on its own
+throwaway test rig - unrelated to this instrument's hardware).
 
-There's no dedicated gamakam (jaru-trigger) key wired yet - it's stood in
-for by the keyboard's spacebar (see poll_gamakam_input). That function is
-the ONLY place that knows the stand-in is a keyboard; swapping in a real
-FSR-based gamakam key later means replacing its body, not the jaru
-trigger logic in control_loop/start_jaru.
+The control keys were originally planned as a second MCP3008 (ADC2) on
+the same SPI0 bus as ADC1 (CE1 instead of ADC1's CE0). That chip turned
+out to have an unresolved hardware fault: every channel (including one
+never wired to anything) read an identical fixed value regardless of the
+FSR, the pulldown, a direct ground jumper, which physical MCP3008 unit
+was in the socket, or which chip-select line addressed it - conclusive
+enough to rule out wiring and point at the chip itself. It was replaced
+entirely with an Arduino Nano 33 BLE reading its own three analog FSRs
+(A0=gamakam, A1=octave+, A2=octave-; A4/A5 avoided since they default to
+this board's I2C bus) and streaming them as CSV over USB serial - see
+control_keys/control_keys.ino and poll_nano_values below. No ADC2/CE1/
+spidev code remains in this file.
+
+The gamakam (jaru-trigger) key is now a real FSR (Nano A0), read
+edge-triggered exactly like the ADC1 note keys (see poll_gamakam).
+Octave+ / octave- (Nano A1 / A2) are also edge-triggered (debounced -
+see poll_octave_keys) and shift the module-level `octave_shift`, which
+every key position's pitch resolution (see resolve_position) is offset
+by, clamped to +-OCTAVE_SHIFT_LIMIT.
 
 NOTE: an earlier revision of this file used a FIXED Sa-Ri-Ga-Ma-Pa-Da-
 Ni-Sa' diatonic layout (natural-major swara values) instead of raga
@@ -34,8 +48,9 @@ environment's tools. Dropped per instruction rather than substituted
 with a lower-quality or license-uncertain source. Because of this, 't'
 as a stdin command is unused in this file - the collision concern
 raised about physical note-key input doesn't apply anyway, since this
-file's note keys are FSRs read over SPI, not keyboard keys (only the
-spacebar gamakam stand-in reads the keyboard at all).
+file's note keys are FSRs read over SPI (ADC1) and its control keys are
+FSRs read via the Arduino Nano over USB serial; no code in this file
+reads the keyboard for performance input at all.
 
 Provenance of each piece (this file's own PR description/conversation
 has the full detail; summarized here):
@@ -75,6 +90,26 @@ has the full detail; summarized here):
   - Double bass drone (C#1/C#2, 'b'/'c'): gamaka_keyboard.py, unchanged.
   - 3-band EQ (bass/mid/treble): gamaka_keyboard_mixer.py, unchanged.
   - Dual I2S+headphone output ('s'): gamaka_keyboard_mixer.py, unchanged.
+  - Control-key integration (gamakam, octave+, octave-) and the
+    `octave_shift` mechanism: NEW in this revision, replacing the
+    keyboard-spacebar gamakam stand-in entirely. Octave shift concept
+    (a signed integer that offsets every key's resolved pitch by whole
+    octaves) ported from sliding_window_raga.py's manual-octave-key
+    handling; here it's driven by real FSRs instead of keyboard keys,
+    and applies uniformly to all 8 ADC1 positions via resolve_position
+    rather than to a positional swara pattern. Originally built against
+    a second MCP3008 (ADC2); rebuilt against an Arduino Nano 33 BLE over
+    USB serial after ADC2 proved to have an unresolved chip-level fault
+    (see the module docstring's opening section). octave_shift is
+    clamped to +-OCTAVE_SHIFT_LIMIT on every increment/decrement, and
+    resolve_position's dynamically-computed rate is separately clamped
+    to [RATE_MIN, RATE_MAX] as defense-in-depth - both fixes were added
+    after a runaway octave_shift (from then-undebounced, then-unbounded
+    octave keys) was diagnosed as the cause of a "very low pitch /
+    heavy speaker vibration" bug, and both are kept here even though the
+    input source changed, since the failure mode they guard against
+    (an extreme target_hz collapsing playback rate toward zero) doesn't
+    depend on which hardware drives octave_shift.
 
 Usage:
     python3 jaladarangam.py --raga Shankarabharanam
@@ -89,9 +124,9 @@ import time
 import numpy as np
 import soundfile as sf
 import sounddevice as sd
+import serial
+from serial.tools import list_ports
 import spidev
-import evdev
-from evdev import ecodes
 import mandolin_audio as ma
 from mandolin_audio import SAMPLE_RATE, BLOCKSIZE
 
@@ -103,25 +138,132 @@ LIVE_POSITIONS = set(range(8))
 
 CONTROL_INTERVAL = 0.02  # seconds between SPI poll rounds, same as gamaka.py
 PRESS_THRESHOLD = 100    # raw ADC counts (0-1023) - validated against real
-                         # Sa/Ri hardware in key_press.py.
+                         # Sa/Ri hardware in key_press.py. ADC1 note keys
+                         # only - the control keys have their own threshold
+                         # below (NANO_PRESS_THRESHOLD), since they're now
+                         # read by different hardware with its own noise
+                         # floor/range, not this same MCP3008.
 
-KEYBOARD_NAME = "Logitech K400 Plus"
-FALLBACK_DEVICE = "/dev/input/event0"
-GAMAKAM_STANDIN_KEY = ecodes.KEY_SPACE  # temporary - see poll_gamakam_input
+# --- Arduino Nano 33 BLE: control keys (gamakam, octave+, octave-) --------
+# Replaces the second MCP3008 (ADC2) entirely - see module docstring for
+# why. A0=gamakam, A1=octave+, A2=octave- on the Nano; A4/A5 avoided since
+# they default to this board's I2C bus. Firmware: control_keys/
+# control_keys.ino, which streams "gamakam,octave_up,octave_down\n" once
+# per ~20ms over USB serial.
+NANO_VID = 0x2341
+NANO_PID = 0x805A
+NANO_FALLBACK_PORT = '/dev/ttyACM0'  # used only if VID/PID auto-detection
+                                     # (find_nano_port) finds nothing - the
+                                     # port is not assumed stable across
+                                     # reboots/reconnects otherwise.
+NANO_BAUD = 115200
+
+NANO_PRESS_THRESHOLD = 100  # raw analogRead counts (0-1023 - the Nano's
+                            # analogRead defaults to the same 10-bit range
+                            # as the MCP3008s). Bench-tested directly
+                            # against these three specific FSRs (not
+                            # assumed from the note-key threshold above):
+                            # idle reads 0-4, presses climb smoothly to
+                            # 850-950+, so 100 leaves wide margin on both
+                            # sides of this particular hardware's range.
+
+OCTAVE_SHIFT_LIMIT = 2  # +-2 octaves - enough range to be musically useful,
+                        # tight enough that a runaway octave_shift (bug,
+                        # debounce failure, etc.) can't collapse resolve_
+                        # position's target_hz toward zero. Clamped on every
+                        # increment/decrement in poll_octave_keys, not just
+                        # capped after the fact.
+
+OCTAVE_DEBOUNCE_POLLS = 5  # consecutive above-threshold polls (~100ms at
+                            # CONTROL_INTERVAL=0.02s) required before an
+                            # octave+/octave- reading counts as a real press
+                            # (see _debounced_press). Guards against a raw
+                            # value that wobbles across NANO_PRESS_THRESHOLD
+                            # (sensor noise, marginal contact) registering as
+                            # several spurious edges during one physical
+                            # press-and-hold - each edge permanently shifts
+                            # octave_shift, unlike a note-key false retrigger
+                            # (harmless re-pluck), so only the octave keys
+                            # need this. Kept even though the old ADC2 chip
+                            # (the original reason this was added) is gone -
+                            # cheap insurance against any future sensor
+                            # noise on this path, same as the clamps above.
+
+RATE_MIN = 0.5  # -1 octave from the sample's own measured pitch
+RATE_MAX = 2.0  # +1 octave - clamps resolve_position's dynamic rate
+                # calculation so that even if target_hz is ever extreme
+                # (octave_shift misbehaving or otherwise), playback rate
+                # physically cannot collapse toward silence-via-near-zero
+                # or spike to an ear-damaging pitch. Defense-in-depth on
+                # top of the octave_shift clamp above, not a replacement
+                # for it.
 
 UPPER_SA_POSITION = 7  # key 8 - always upper Sa, regardless of raga pattern
                         # length (see resolve_position)
 
-# --- MCP3008 (ADC1 - the only physically wired one) ------------------------
+# --- MCP3008 ADC1 (note keys, CE0) ------------------------------------------
 spi = spidev.SpiDev()
 spi.open(0, 0)  # bus 0, CE0
 spi.max_speed_hz = 1350000
 
 
-def read_channel(ch):
+def read_channel(dev, ch):
     cmd = [1, (8 + ch) << 4, 0]
-    reply = spi.xfer2(cmd)
+    reply = dev.xfer2(cmd)
     return ((reply[1] & 3) << 8) | reply[2]
+
+
+# --- Arduino Nano 33 BLE (control keys) -------------------------------------
+def find_nano_port():
+    """Auto-detects the Nano by USB VID/PID rather than assuming a fixed
+    /dev/ttyACM* path, which is not guaranteed stable across reboots or
+    reconnects (particularly if another USB-serial device is ever
+    plugged in). Falls back to NANO_FALLBACK_PORT if no matching device
+    is found, so this still does something sensible on a system where
+    pyserial's device enumeration doesn't expose vid/pid (rare, but seen
+    on some platforms)."""
+    for port in list_ports.comports():
+        if port.vid == NANO_VID and port.pid == NANO_PID:
+            return port.device
+    return NANO_FALLBACK_PORT
+
+
+nano_serial = serial.Serial(find_nano_port(), NANO_BAUD, timeout=0)
+time.sleep(2)  # let the board finish any reset/re-enumeration after the
+                # port opens before trusting its output
+nano_serial.reset_input_buffer()
+
+_nano_buf = b''
+_nano_last_values = (0, 0, 0)  # (gamakam_raw, octave_up_raw, octave_down_raw)
+
+
+def poll_nano_values():
+    """Non-blocking drain of whatever the Nano has sent since the last
+    poll - the same non-blocking-drain principle used for the evdev
+    keyboard stand-in this Nano replaces: never block control_loop
+    waiting on serial I/O (nano_serial is opened with timeout=0, and
+    .in_waiting/.read() here only ever consume bytes already buffered),
+    and if several lines arrived since the last poll, only the newest
+    complete one matters - older backlog is discarded, not queued or
+    processed one-by-one. Returns the latest known (gamakam_raw,
+    octave_up_raw, octave_down_raw), carrying forward the previous
+    values when no new complete line has arrived yet this poll (a quiet
+    poll is NOT treated as a release - see poll_gamakam/poll_octave_keys,
+    which only act on values this function returns)."""
+    global _nano_buf, _nano_last_values
+    n = nano_serial.in_waiting
+    if n:
+        _nano_buf += nano_serial.read(n)
+    if b'\n' in _nano_buf:
+        *complete_lines, _nano_buf = _nano_buf.split(b'\n')
+        for line in complete_lines:
+            parts = line.decode(errors='ignore').strip().split(',')
+            if len(parts) == 3:
+                try:
+                    _nano_last_values = tuple(int(p) for p in parts)
+                except ValueError:
+                    pass
+    return _nano_last_values
 
 
 # --- Raga corpus + positional mapping (ported from sliding_window_raga.py,
@@ -259,27 +401,33 @@ class MandolinBank:
 
 def resolve_position(position):
     """Returns (samples, rate, target_hz, source_used, note_label, swara)
-    for the given key position under the current raga/tonic/source.
-    Position UPPER_SA_POSITION (7) is a hardcoded override - always Sa at
-    +12 semitones from sa_idx - regardless of what the generic pattern-
-    continuation formula would otherwise produce for a short raga (see
-    module docstring). Positions 0-6 use position_to_semitones/
+    for the given key position under the current raga/tonic/source/
+    octave_shift. Position UPPER_SA_POSITION (7) is a hardcoded override -
+    always Sa at +12 semitones from sa_idx - regardless of what the generic
+    pattern-continuation formula would otherwise produce for a short raga
+    (see module docstring). Positions 0-6 use position_to_semitones/
     position_to_swara verbatim (their own next-octave continuation for
-    raga patterns shorter than 7 is untouched, reused as-is)."""
+    raga patterns shorter than 7 is untouched, reused as-is). octave_shift
+    (Nano octave+/octave- keys) is applied uniformly to every position
+    here, so the whole instrument's active octave moves together. The
+    mandolin path's dynamically-computed rate is clamped to [RATE_MIN,
+    RATE_MAX] as defense-in-depth (see those constants) - the guitar/flute
+    fallback paths always use a literal rate of 1.0, which is already
+    within that range."""
     if position == UPPER_SA_POSITION:
         swara = 'S'
         semitones = 12
     else:
         swara = position_to_swara(position, pattern)
         semitones = position_to_semitones(position, pattern, swara_semitones)
-    target_idx = sa_idx + semitones
+    target_idx = sa_idx + semitones + 12 * octave_shift
     target_hz = index_to_hz(target_idx)
 
     if sample_source == 'mandolin':
         entry = mandolin_bank.get(position)
         if entry is not None:
             samples, measured_hz = entry
-            rate = target_hz / measured_hz
+            rate = max(RATE_MIN, min(RATE_MAX, target_hz / measured_hz))
             return samples, rate, target_hz, 'mandolin', f'{MANDOLIN_POSITION_NOTES[position]}_mid (corrected)', swara
         samples, idx, exact = guitar_bank.get(target_idx)
         label = index_to_note(idx) if exact else f'{index_to_note(idx)} (nearest)'
@@ -461,6 +609,7 @@ eq_bass = None
 eq_mid = None
 eq_treble = None
 gamakam_held = False
+octave_shift = 0  # signed integer, shifted +-1 per octave+/octave- press (Nano)
 
 
 def audio_callback(outdata, frames, time_info, status):
@@ -547,7 +696,7 @@ def stop_drone():
 
 def print_mapping():
     print(f"  mapping [raga={raga['name']}] [source={sample_source}] "
-          f"[Sa={sa_note}={index_to_hz(sa_idx):.1f}Hz]:", flush=True)
+          f"[Sa={sa_note}={index_to_hz(sa_idx):.1f}Hz] [octave={octave_shift:+d}]:", flush=True)
     for position in range(8):
         live = 'LIVE' if position in LIVE_POSITIONS else 'not wired yet'
         samples, rate, target_hz, source_used, note_label, swara = resolve_position(position)
@@ -594,48 +743,86 @@ def control_listener():
             adjust_band(band, direction)
 
 
-def find_keyboard():
-    for path in evdev.list_devices():
-        dev = evdev.InputDevice(path)
-        if dev.name == KEYBOARD_NAME:
-            return dev
-    return evdev.InputDevice(FALLBACK_DEVICE)
-
-
-def poll_gamakam_input(dev):
-    """Non-blocking poll of the temporary gamakam stand-in (held spacebar).
-    Drains every currently-queued keyboard event via dev.read_one() (which
-    returns None immediately rather than blocking when the queue is empty)
-    and updates/returns the module-level gamakam_held flag.
-
-    This is the ONLY function that knows the gamakam key is a keyboard
-    stand-in. Swapping in a real FSR-based gamakam key later means
-    replacing this function's body with an MCP3008 threshold check -
-    control_loop/start_jaru's trigger logic (gamakam_held and ringing =
-    jaru) doesn't change."""
+def poll_gamakam(raw, prev_pressed):
+    """Edge-triggered read of the real gamakam FSR (Nano A0, via
+    poll_nano_values) - same press/release detection pattern as the ADC1
+    note keys, and the same logic as the original ADC2 implementation
+    this replaces (only the raw-value source changed). Updates and
+    returns the module-level gamakam_held flag, printing on every
+    press/release transition so hardware behavior is directly observable.
+    Returns (held, now_pressed) so the caller can track the edge state."""
     global gamakam_held
-    while True:
-        event = dev.read_one()
-        if event is None:
-            break
-        if event.type == ecodes.EV_KEY and event.code == GAMAKAM_STANDIN_KEY:
-            if event.value == 1:
-                gamakam_held = True
-            elif event.value == 0:
-                gamakam_held = False
-    return gamakam_held
+    now_pressed = raw >= NANO_PRESS_THRESHOLD
+    if now_pressed != prev_pressed:
+        gamakam_held = now_pressed
+        print(f"[gamakam] {'PRESSED' if gamakam_held else 'RELEASED'} (raw={raw})", flush=True)
+    return gamakam_held, now_pressed
 
 
-def control_loop(dev):
+def _debounced_press(raw, state):
+    """Returns True exactly once per confirmed physical press of a Nano
+    octave key. `state` is a per-key dict {'count', 'armed'} the caller
+    holds across polls (see poll_octave_keys). Requires OCTAVE_DEBOUNCE_
+    POLLS consecutive above-NANO_PRESS_THRESHOLD reads before firing - any
+    read that drops back below threshold resets the count to 0, so a value
+    that wobbles across the threshold (sensor noise, marginal contact) has
+    to settle above it for the full debounce window before it counts,
+    rather than firing on the first crossing. Re-arms (allows a second
+    press to fire) only after a below-threshold read is seen, so a single
+    sustained press can't itself repeat-fire once confirmed."""
+    if raw >= NANO_PRESS_THRESHOLD:
+        state['count'] += 1
+        if state['armed'] and state['count'] >= OCTAVE_DEBOUNCE_POLLS:
+            state['armed'] = False
+            return True
+    else:
+        state['count'] = 0
+        state['armed'] = True
+    return False
+
+
+def poll_octave_keys(raw_up, raw_down, octave_up_state, octave_down_state):
+    """Debounced, edge-triggered read of the real octave+/octave- FSRs
+    (Nano A1/A2, via poll_nano_values; see _debounced_press). Each
+    confirmed press shifts the module-level octave_shift by +-1, clamped
+    to +-OCTAVE_SHIFT_LIMIT on every increment/decrement - a press at the
+    limit is a no-op (with its own print) rather than silently doing
+    nothing, so it's clear from the console that the limit, not a missed
+    press, is why nothing changed. octave_up_state/octave_down_state are
+    per-key dicts the caller holds across polls; mutated in place."""
+    global octave_shift
+    if _debounced_press(raw_up, octave_up_state):
+        if octave_shift < OCTAVE_SHIFT_LIMIT:
+            octave_shift += 1
+            print(f"[octave] UP -> {octave_shift:+d}", flush=True)
+            print_mapping()
+        else:
+            print(f"[octave] UP ignored - already at max +{OCTAVE_SHIFT_LIMIT}", flush=True)
+
+    if _debounced_press(raw_down, octave_down_state):
+        if octave_shift > -OCTAVE_SHIFT_LIMIT:
+            octave_shift -= 1
+            print(f"[octave] DOWN -> {octave_shift:+d}", flush=True)
+            print_mapping()
+        else:
+            print(f"[octave] DOWN ignored - already at min -{OCTAVE_SHIFT_LIMIT}", flush=True)
+
+
+def control_loop():
     pressed = {position: False for position in range(8)}
+    gamakam_prev_pressed = False
+    octave_up_state = {'count': 0, 'armed': True}
+    octave_down_state = {'count': 0, 'armed': True}
 
     while True:
-        held = poll_gamakam_input(dev)
+        gamakam_raw, octave_up_raw, octave_down_raw = poll_nano_values()
+        held, gamakam_prev_pressed = poll_gamakam(gamakam_raw, gamakam_prev_pressed)
+        poll_octave_keys(octave_up_raw, octave_down_raw, octave_up_state, octave_down_state)
 
         for position in range(8):
             if position not in LIVE_POSITIONS:
                 continue
-            raw = read_channel(position)
+            raw = read_channel(spi, position)
             now_pressed = raw >= PRESS_THRESHOLD
             if now_pressed and not pressed[position]:
                 ringing = active_voice is not None and active_voice['active']
@@ -716,12 +903,13 @@ def main():
           f"treble={band_gains['treble']:+.0f}dB", flush=True)
     print("Dual output: 's'+Enter = toggle headphone jack on/off alongside I2S "
           "(additive). [output] I2S only", flush=True)
-    print("Gamakam (jaru trigger) stand-in: HOLD SPACEBAR + press a note key while "
-          "another note is ringing = jaru glide (nearest octave). No dedicated "
-          "gamakam FSR key wired yet.", flush=True)
-
-    dev = find_keyboard()
-    print(f"Listening for spacebar on {dev.path} ({dev.name}).", flush=True)
+    print("Gamakam (jaru trigger): HOLD the gamakam FSR (Nano A0) + press a note "
+          "key while another note is ringing = jaru glide (nearest octave).",
+          flush=True)
+    print("Octave shift: octave+ (Nano A1) / octave- (Nano A2) each shift the "
+          "whole instrument's active octave by one, edge-triggered (once per "
+          f"press, clamped to +-{OCTAVE_SHIFT_LIMIT}). [octave] {octave_shift:+d}",
+          flush=True)
 
     listener_thread = threading.Thread(target=control_listener, daemon=True)
     listener_thread.start()
@@ -729,7 +917,7 @@ def main():
     try:
         with sd.OutputStream(samplerate=SAMPLE_RATE, blocksize=BLOCKSIZE, channels=1,
                               dtype='float32', callback=audio_callback):
-            control_loop(dev)
+            control_loop()
     except KeyboardInterrupt:
         print("\nStopped.", flush=True)
     finally:
@@ -737,6 +925,7 @@ def main():
             headphone_stream.stop()
             headphone_stream.close()
         spi.close()
+        nano_serial.close()
 
 
 if __name__ == '__main__':
