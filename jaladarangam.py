@@ -31,6 +31,77 @@ see poll_octave_keys) and shift the module-level `octave_shift`, which
 every key position's pitch resolution (see resolve_position) is offset
 by, clamped to +-OCTAVE_SHIFT_LIMIT.
 
+POLYPHONY: the instrument is no longer monophonic. `voices` is a pool
+of up to MAX_VOICES independently-playing voice dicts (one per
+currently-ringing key position), each with its own sample position,
+playback rate, and decay - all summed in audio_callback. A key's own
+re-pluck replaces that same key's own prior voice (matching a real
+instrument re-plucking its own string) rather than layering a second
+copy of itself; a DIFFERENT key's pluck never touches another key's
+voice. MAX_VOICES=8 matches the physical key count, so voice-stealing
+(oldest-first - see pluck) is defense-in-depth for a future change
+that might exceed that, not something normal 8-key play can trigger.
+gamakam+jaru always acts on `most_recent_voice` (whichever voice was
+plucked or last jaru'd most recently), matching a player having one
+hand doing the glide motion regardless of how many other notes are
+independently ringing.
+
+OCTAVE-NEAREST PLUCK SELECTION: a normal pluck (not jaru) of Ri/Ga/Ma/
+Pa/Da/Ni (positions 1-6) now lands in whichever octave (its own
+default/structural one, one up, or one down) is nearest in pitch to
+`most_recent_voice`'s pitch, via the same principle as nearest_octave_
+hz - so e.g. playing upper Sa (key 8) then Ri (key 2) continues in the
+upper register instead of dropping over an octave to Ri's default mid
+position. Sa itself (position 0) and upper Sa (UPPER_SA_POSITION) are
+deliberately EXCLUDED from this - they already have two dedicated,
+unambiguous keys for their two registers, and applying nearest-pitch
+there too would flip the traditional Ni->Sa cadence to resolve upward
+instead of down (the leading-tone-to-tonic gap is mathematically
+always the largest "improvement" nearest-pitch could find, so no
+threshold can fix the Ri case without also flipping this one - see
+this file's PR discussion for the worked-through math). The manual
+octave+/octave- keys remain the explicit override for any case where
+the automatic choice isn't the one intended.
+
+ODUKKAL (pressure->pitch bend) and ATTACK VELOCITY: while a note key
+is held and its voice is ringing, sustained pressure depth on that
+SAME key bends its pitch up by 0-ODUKKAL_MAX_CENTS, smoothed via a
+one-euro filter (see one_euro_filter) - same filter design as gamaka.
+py's softpot smoothing, ported here for the same reason (a fixed-alpha
+EMA lags fast pressure changes badly). Toggled on/off via 'o'+Enter
+(default OFF); when off, pressure has zero effect on pitch. This is
+purely additive on top of whatever jaru/octave-shift state a voice
+already has (see audio_callback's rate composition), never a
+replacement, mirroring gamaka.py's kampita-is-additive-to-jaru
+design. Independent per voice, since each voice has its own filter
+state and its own key's pressure feeds only its own bend.
+
+Separately (NOT gated by the odukkal toggle - always active), the
+rate of pressure rise at a fresh pluck's press-edge (dF/dt, measured
+in raw ADC counts/sec) maps to attack velocity via velocity_to_params,
+currently scaling amplitude only, since only one mandolin stress-level
+recording exists on disk today (see mandolin_audio.STRESS_LEVEL) -
+that function returns a dict specifically so a future 'layer' key can
+drive real low/high-stress sample selection without restructuring any
+caller.
+
+PER-INSTRUMENT ENVELOPE: mandolin/guitar are 'plucked' - attack on
+press-edge, then ring through their own natural decay regardless of
+release, exactly as this file has always behaved. flute is 'sustained'
+- attack the same way, but release stops the note promptly (a 50ms
+fade, FLUTE_RELEASE_SECONDS, to avoid a click) instead of letting it
+play out. A voice's envelope is fixed at pluck time from the actual
+resolved source_used (so a flute pluck that falls back to a guitar
+sample - outside flute's recorded range - correctly gets plucked
+behavior, since what's actually ringing is a guitar recording). Real
+sustain/looping was considered (see ENVELOPE_MODES/FLUTE_RELEASE_
+SECONDS section) and deliberately not implemented: the flute samples'
+RMS envelope does show a genuine ~2-2.5s quasi-steady region, but with
+real breath/vibrato variation rather than a flat plateau, so a loop
+point picked without per-note listening/tuning risks an audible seam -
+worse than just letting each note play its natural (already fairly
+long) recorded length while held.
+
 NOTE: an earlier revision of this file used a FIXED Sa-Ri-Ga-Ma-Pa-Da-
 Ni-Sa' diatonic layout (natural-major swara values) instead of raga
 selection. This revision replaces that entirely per updated
@@ -110,6 +181,29 @@ has the full detail; summarized here):
     input source changed, since the failure mode they guard against
     (an extreme target_hz collapsing playback rate toward zero) doesn't
     depend on which hardware drives octave_shift.
+  - Polyphony (the `voices` pool, voice-stealing, per-voice glide/
+    odukkal state), octave-nearest pluck selection (Sa/upper-Sa
+    excluded - see module docstring), odukkal pressure->bend, and
+    attack velocity: NEW in this revision. The single global
+    `active_voice`/`glide` model is gone entirely, replaced by a list
+    of independent voice dicts; jaru's cents-ramp math (ramp_cents,
+    cents_between, nearest_octave_hz) is unchanged, just now reads/
+    writes `most_recent_voice` and a per-voice 'glide' field instead
+    of module globals. odukkal reuses gamaka.py's one-euro filter
+    design (ONE_EURO_* constants/tuning) verbatim, one filter instance
+    per voice rather than one shared instance, since two held keys'
+    pressure must never leak into each other's bend.
+  - Per-instrument envelope (plucked vs sustained), flute's release
+    fade: NEW in this revision. A voice's envelope mode and release
+    state ('envelope', 'releasing', 'release_start') are new per-voice
+    fields alongside the polyphony fields above; the fade itself
+    (audio_callback) is a plain per-frame linear gain ramp, sample-
+    accurate against real elapsed time rather than block-quantized, so
+    the short (50ms) duration stays smooth regardless of BLOCKSIZE
+    boundaries. True crossfaded sample looping for the sustain portion
+    was considered and deliberately not implemented - see module
+    docstring for the reasoning (real vibrato/breath variation in the
+    samples' sustain region makes a blind loop point risky).
 
 Usage:
     python3 jaladarangam.py --raga Shankarabharanam
@@ -196,10 +290,56 @@ RATE_MAX = 2.0  # +1 octave - clamps resolve_position's dynamic rate
                 # physically cannot collapse toward silence-via-near-zero
                 # or spike to an ear-damaging pitch. Defense-in-depth on
                 # top of the octave_shift clamp above, not a replacement
-                # for it.
+                # for it. Also the final clamp on the odukkal-combined
+                # rate in audio_callback - see MAX_VOICES section below.
 
 UPPER_SA_POSITION = 7  # key 8 - always upper Sa, regardless of raga pattern
                         # length (see resolve_position)
+
+# --- Polyphony ---------------------------------------------------------
+MAX_VOICES = 8  # matches the physical key count - see module docstring
+                # for why this is enough (each key maps to at most one
+                # voice; a same-key re-pluck replaces its own prior voice
+                # rather than adding a second one). Voice-stealing in
+                # pluck() below is defense-in-depth for a future change
+                # that might exceed this, not something normal play can
+                # trigger today.
+
+# --- Octave-nearest pluck selection (Ri/Ga/Ma/Pa/Da/Ni only - see
+# module docstring for why Sa/upper-Sa are excluded) ------------------
+OCTAVE_NEAREST_EXCLUDED_POSITIONS = (0, UPPER_SA_POSITION)
+
+# --- Odukkal (pressure -> pitch bend while a key is held) -------------
+ODUKKAL_MAX_CENTS = 50.0    # max upward bend at a firm sustained press,
+                            # per the "0 to about +50 cents" ask
+ODUKKAL_PRESS_MAX = 900     # raw ADC counts - practical firm-press
+                            # ceiling for these FSR402s; same value/
+                            # rationale as gamaka.py's ADC_PRACTICAL_MAX
+                            # (same sensor hardware). depth=0 right at
+                            # PRESS_THRESHOLD (just barely pressed),
+                            # depth=1 at this ceiling.
+
+# One-euro filter tuning (Casiez et al. 2012) - ported verbatim from
+# gamaka.py's one_euro_softpot, which fixed a measured 60-150c lag
+# (spiking past 300c in fast bursts) from a fixed-alpha EMA on this same
+# kind of FSR pressure signal. See one_euro_filter below.
+ONE_EURO_MIN_CUTOFF = 1.0
+ONE_EURO_BETA = 0.007
+ONE_EURO_DCUTOFF = 1.0
+
+# --- Attack velocity (dF/dt at press-edge -> pluck loudness) ----------
+# At CONTROL_INTERVAL=0.02s (50Hz) polling, most presses complete their
+# rise within a single sample, so this is really "how much pressure had
+# built up by the first sample above PRESS_THRESHOLD" rather than a
+# finer-grained speed measurement - still a usable hardness proxy, but
+# the counts/sec numbers it produces are much larger than a naive first
+# guess: live-tested against real presses, ordinary hits landed in the
+# 11000-30000 c/s range (not the low thousands originally assumed), so
+# these bounds reflect that. Still worth tuning further by ear.
+VELOCITY_MIN_COUNTS_PER_SEC = 3000    # at/below this: softest attack
+VELOCITY_MAX_COUNTS_PER_SEC = 40000   # at/above this: hardest attack
+VELOCITY_MIN_AMPLITUDE = 0.5
+VELOCITY_MAX_AMPLITUDE = 1.0
 
 # --- MCP3008 ADC1 (note keys, CE0) ------------------------------------------
 spi = spidev.SpiDev()
@@ -347,6 +487,47 @@ MANDOLIN_POSITION_NOTES = ['sa', 'ri', 'ga', 'ma', 'pa']  # key positions 0-4;
                                                             # position 7 have
                                                             # no mandolin file
 
+# --- Per-instrument envelope mode --------------------------------------
+# 'plucked' (mandolin, guitar): a real plucked string can't be silenced
+# by releasing a finger - attack on press-edge, then play through the
+# recording's own natural decay regardless of release. Unchanged
+# behavior, exactly as this file has always worked.
+# 'sustained' (flute): a wind instrument only sounds while actively
+# blown/held - attack on press-edge same as plucked, but release stops
+# the note promptly (short fade, see FLUTE_RELEASE_SECONDS) rather than
+# letting it play out. A voice's envelope is fixed at pluck time (see
+# pluck) from the ACTUAL resolved source_used, not the nominal
+# sample_source - if the flute source falls back to a guitar sample
+# (outside flute's recorded range), what's actually ringing is a guitar
+# pluck recording, so it correctly gets plucked-mode behavior, not a
+# fade cutting off a plucked sample's own natural decay. Switching
+# sample_source later never retroactively changes an already-ringing
+# voice's envelope.
+
+FLUTE_RELEASE_SECONDS = 0.05  # 50ms fade-out on release - within the
+                              # requested 30-80ms range, short enough to
+                              # feel prompt, long enough to avoid an
+                              # audible click/pop from a hard cut. Real-
+                              # time-based (sample-accurate per-block
+                              # linspace in audio_callback), independent
+                              # per voice.
+
+# Sustain (hold) behavior: the recorded flute samples do have a genuine
+# quasi-steady-state region after their attack (checked directly - RMS
+# envelope stays in a natural ~0.03-0.10 range from about 0.1s to
+# 2.0-2.5s before decaying to near-silence), but that region has real
+# breath/vibrato variation rather than a flat plateau, so a loop point
+# picked without per-note manual tuning/listening risks an audible seam
+# - exactly the artifact a naive auto-loop would introduce. Since each
+# note's usable pre-decay window (~2-2.5s) already covers most realistic
+# holds, and true crossfaded looping needs per-sample-file judgment that
+# isn't safe to automate blind, this revision uses the simpler fallback:
+# a held note just plays its natural recorded length (never cut short
+# while held - already true of every envelope mode, since nothing in
+# this file cuts a voice on elapsed hold time). The part that must not
+# be skipped - prompt, click-free release - gets the real engineering
+# effort instead (see FLUTE_RELEASE_SECONDS and audio_callback).
+
 
 class ChromaticBank:
     """Wide, densely-chromatic sample set (guitar_placeholder,
@@ -399,7 +580,7 @@ class MandolinBank:
         return self.by_position.get(position)
 
 
-def resolve_position(position):
+def resolve_position(position, reference_hz=None):
     """Returns (samples, rate, target_hz, source_used, note_label, swara)
     for the given key position under the current raga/tonic/source/
     octave_shift. Position UPPER_SA_POSITION (7) is a hardcoded override -
@@ -409,8 +590,18 @@ def resolve_position(position):
     position_to_swara verbatim (their own next-octave continuation for
     raga patterns shorter than 7 is untouched, reused as-is). octave_shift
     (Nano octave+/octave- keys) is applied uniformly to every position
-    here, so the whole instrument's active octave moves together. The
-    mandolin path's dynamically-computed rate is clamped to [RATE_MIN,
+    here, so the whole instrument's active octave moves together.
+
+    reference_hz, when given, additionally nudges the result a whole
+    octave up or down - whichever lands nearest reference_hz - for any
+    position NOT in OCTAVE_NEAREST_EXCLUDED_POSITIONS (Sa and upper Sa
+    are excluded; see module docstring for why). Only pluck() passes
+    reference_hz (the most recently sounded voice's pitch); print_mapping
+    and start_jaru's own resolve_position call both omit it, so they see
+    the plain structural/default-octave mapping. This never changes
+    which swara/semitone-within-octave is meant, only which octave.
+
+    The mandolin path's dynamically-computed rate is clamped to [RATE_MIN,
     RATE_MAX] as defense-in-depth (see those constants) - the guitar/flute
     fallback paths always use a literal rate of 1.0, which is already
     within that range."""
@@ -421,6 +612,12 @@ def resolve_position(position):
         swara = position_to_swara(position, pattern)
         semitones = position_to_semitones(position, pattern, swara_semitones)
     target_idx = sa_idx + semitones + 12 * octave_shift
+
+    if reference_hz is not None and position not in OCTAVE_NEAREST_EXCLUDED_POSITIONS:
+        candidate_indices = (target_idx - 12, target_idx, target_idx + 12)
+        target_idx = min(candidate_indices,
+                          key=lambda i: abs(ma.cents_between(reference_hz, index_to_hz(i))))
+
     target_hz = index_to_hz(target_idx)
 
     if sample_source == 'mandolin':
@@ -458,6 +655,78 @@ def nearest_octave_hz(base_hz, current_hz):
     almost an octave above) needs 'down' too."""
     candidates = (base_hz, base_hz * 2.0, base_hz / 2.0)
     return min(candidates, key=lambda hz: abs(ma.cents_between(current_hz, hz)))
+
+
+def find_voice(voices, position):
+    """The (at most one) currently-active voice mapped to this key
+    position, or None. Linear scan over at most MAX_VOICES=8 entries -
+    not worth a dict-by-position structure for a pool this small."""
+    for v in voices:
+        if v['position'] == position:
+            return v
+    return None
+
+
+def _one_euro_alpha(cutoff_hz, dt):
+    tau = 1.0 / (2 * np.pi * cutoff_hz)
+    return 1.0 / (1.0 + tau / dt)
+
+
+def one_euro_filter(state, raw, dt):
+    """Velocity-aware low-pass filter (Casiez et al. 2012, "1 euro
+    filter") - smooths hard when the signal is still, relaxes toward the
+    raw value as it moves faster, avoiding the lag a fixed-alpha EMA has
+    no way to avoid without sacrificing one for the other. Ported from
+    gamaka.py's one_euro_softpot (same ONE_EURO_* tuning), which fixed a
+    measured 60-150c lag (spiking past 300c during fast bursts) from a
+    fixed alpha=0.2 EMA on this same kind of FSR pressure signal - used
+    here for odukkal's pressure->bend smoothing for the same reason.
+    `state` is a per-voice dict {'initialized','value','prev_raw','dx'}
+    the caller holds (one per voice - see pluck's 'odukkal_filter' field)
+    so every voice's filter is fully independent of every other's."""
+    if not state['initialized']:
+        state['initialized'] = True
+        state['value'] = float(raw)
+        state['prev_raw'] = float(raw)
+        state['dx'] = 0.0
+        return state['value']
+    dx = (raw - state['prev_raw']) / dt
+    dx_alpha = _one_euro_alpha(ONE_EURO_DCUTOFF, dt)
+    state['dx'] = dx_alpha * dx + (1 - dx_alpha) * state['dx']
+    cutoff = ONE_EURO_MIN_CUTOFF + ONE_EURO_BETA * abs(state['dx'])
+    alpha = _one_euro_alpha(cutoff, dt)
+    state['value'] = alpha * raw + (1 - alpha) * state['value']
+    state['prev_raw'] = raw
+    return state['value']
+
+
+def update_odukkal(voice, raw, dt):
+    """Updates voice['odukkal_cents'] from this voice's own key's live
+    raw pressure, one-euro-smoothed (see one_euro_filter). depth 0 right
+    at PRESS_THRESHOLD (just barely pressed) rising to 1 at
+    ODUKKAL_PRESS_MAX (a firm press), mapped to 0..ODUKKAL_MAX_CENTS.
+    Only ever called for a position's own voice with its own raw reading
+    (see control_loop) - never mixes one key's pressure into another
+    key's bend."""
+    smoothed = one_euro_filter(voice['odukkal_filter'], raw, dt)
+    depth = (smoothed - PRESS_THRESHOLD) / (ODUKKAL_PRESS_MAX - PRESS_THRESHOLD)
+    depth = max(0.0, min(1.0, depth))
+    voice['odukkal_cents'] = depth * ODUKKAL_MAX_CENTS
+
+
+def velocity_to_params(velocity_counts_per_sec):
+    """Maps attack velocity (dF/dt in raw ADC counts/sec, measured at a
+    fresh pluck's press-edge - see control_loop) to playback parameters.
+    Only 'mid' stress-level mandolin samples exist on disk today (see
+    mandolin_audio.STRESS_LEVEL), so velocity can only scale amplitude
+    for now - but this returns a dict (not a bare float) specifically so
+    that once low/high stress recordings exist, 'layer' can drive an
+    actual sample-bank lookup instead, without restructuring callers."""
+    level = (velocity_counts_per_sec - VELOCITY_MIN_COUNTS_PER_SEC) / (
+        VELOCITY_MAX_COUNTS_PER_SEC - VELOCITY_MIN_COUNTS_PER_SEC)
+    level = max(0.0, min(1.0, level))
+    amplitude = VELOCITY_MIN_AMPLITUDE + level * (VELOCITY_MAX_AMPLITUDE - VELOCITY_MIN_AMPLITUDE)
+    return {'amplitude': amplitude, 'layer': ma.STRESS_LEVEL}
 
 
 # --- Double bass drone (gamaka_keyboard.py, unchanged) ---------------------
@@ -590,8 +859,14 @@ def toggle_dual_output():
 
 
 # --- Playback state ---------------------------------------------------------
-active_voice = None  # None or {'samples','pos','rate','active','pitch_hz','note'}
-glide = None          # None, or (start_cents, target_cents, start_time)
+voices = []  # pool of independently-ringing voice dicts, at most MAX_VOICES;
+             # each has 'position','samples','pos','jaru_rate','rate','active',
+             # 'pitch_hz','amplitude','note','glide','odukkal_cents',
+             # 'odukkal_filter','attack_time' - see pluck()
+most_recent_voice = None  # whichever voice pluck()/start_jaru() touched last;
+                          # gamakam+jaru always acts on this one, regardless
+                          # of how many other voices are independently ringing
+odukkal_enabled = False  # 'o'+Enter toggle; default OFF (see toggle_odukkal)
 drone_octave = None
 drone_voice = None
 sample_source = 'mandolin'
@@ -613,20 +888,44 @@ octave_shift = 0  # signed integer, shifted +-1 per octave+/octave- press (Nano)
 
 
 def audio_callback(outdata, frames, time_info, status):
-    global glide, raw_ring_pos
+    global raw_ring_pos
     mix = np.zeros(frames, dtype=np.float32)
-    v = active_voice
-    if v is not None and v['active']:
-        g = glide
+    now = time.monotonic()
+    for v in voices:
+        if not v['active']:
+            continue
+        g = v['glide']
         if g is not None:
             start_cents, target_cents, start_t = g
             cents, done = ma.ramp_cents(start_cents, target_cents, ma.JARU_GLIDE_SECONDS,
-                                         time.monotonic() - start_t)
-            v['rate'] = 2 ** (cents / 1200)
+                                         now - start_t)
+            v['jaru_rate'] = 2 ** (cents / 1200)
             if done:
-                glide = None
+                v['glide'] = None
+        # odukkal_cents is additive on top of jaru_rate, never a replacement
+        # (same principle as gamaka.py's kampita-on-top-of-jaru) - combined
+        # rate is clamped here as the final defense-in-depth, same as the
+        # structural rate already was in resolve_position.
+        combined_rate = v['jaru_rate'] * (2 ** (v['odukkal_cents'] / 1200))
+        v['rate'] = max(RATE_MIN, min(RATE_MAX, combined_rate))
         out = ma.advance_voice(v, frames)
-        mix[:len(out)] += out
+        if v['releasing']:
+            # Sustained-mode (flute) release fade only - plucked voices
+            # (mandolin/guitar) never set 'releasing', so this never runs
+            # for them, matching "unchanged" plucked behavior exactly.
+            # Sample-accurate (per-frame, not per-block) linear ramp so
+            # the ~50ms fade is smooth regardless of block boundaries,
+            # and fully independent per voice (each voice has its own
+            # 'release_start').
+            elapsed_start = now - v['release_start']
+            elapsed_end = elapsed_start + len(out) / SAMPLE_RATE
+            frac_start = min(1.0, max(0.0, elapsed_start / FLUTE_RELEASE_SECONDS))
+            frac_end = min(1.0, max(0.0, elapsed_end / FLUTE_RELEASE_SECONDS))
+            fade = np.linspace(1.0 - frac_start, 1.0 - frac_end, len(out), dtype=np.float32)
+            out = out * fade
+            if frac_end >= 1.0:
+                v['active'] = False  # fade complete - this voice is done
+        mix[:len(out)] += out * v['amplitude']
     dv = drone_voice
     if dv is not None:
         mix += ma.advance_voice_loop(dv, frames) * DRONE_MIX_LEVEL
@@ -648,18 +947,53 @@ def audio_callback(outdata, frames, time_info, status):
         headphone_handoff.append(mix)
 
 
-def pluck(position):
-    global active_voice, glide
-    samples, rate, target_hz, source_used, note_label, swara = resolve_position(position)
-    active_voice = {'samples': samples, 'pos': 0.0, 'rate': rate, 'active': True,
-                     'pitch_hz': target_hz, 'note': f'key{position + 1}({swara})'}
-    glide = None
-    print(f"PLUCK -> {active_voice['note']} [{source_used}: {note_label}] ({target_hz:.1f} Hz)", flush=True)
+def pluck(position, velocity):
+    """Creates and rings a new voice for this key position. If this same
+    position already has a ringing voice, that voice is replaced (a
+    real instrument re-plucking its own string cuts its own prior ring
+    short) - a DIFFERENT position's voice is never touched. If the pool
+    is full of MAX_VOICES *different* keys, the oldest voice is stolen
+    (see module docstring - not reachable in normal 8-key play, since
+    MAX_VOICES equals the key count and each key holds at most one
+    voice). velocity (raw ADC counts/sec, measured at the press-edge -
+    see control_loop) sets this voice's amplitude via velocity_to_params,
+    independent of the odukkal toggle (attack velocity is always live)."""
+    global most_recent_voice
+    reference_hz = most_recent_voice['pitch_hz'] if most_recent_voice is not None else None
+    samples, rate, target_hz, source_used, note_label, swara = resolve_position(position, reference_hz)
+    params = velocity_to_params(velocity)
+    envelope = 'sustained' if source_used == 'flute' else 'plucked'
+    new_voice = {
+        'position': position, 'samples': samples, 'pos': 0.0,
+        'jaru_rate': rate, 'rate': rate, 'active': True, 'pitch_hz': target_hz,
+        'amplitude': params['amplitude'], 'note': f'key{position + 1}({swara})',
+        'glide': None, 'odukkal_cents': 0.0,
+        'odukkal_filter': {'initialized': False, 'value': 0.0, 'prev_raw': 0.0, 'dx': 0.0},
+        'attack_time': time.monotonic(),
+        'envelope': envelope, 'releasing': False, 'release_start': None,
+    }
+    existing = find_voice(voices, position)
+    if existing is not None:
+        voices.remove(existing)
+    elif len(voices) >= MAX_VOICES:
+        oldest = min(voices, key=lambda v: v['attack_time'])
+        voices.remove(oldest)
+        print(f"[voice-steal] pool full ({MAX_VOICES}), dropped {oldest['note']} "
+              f"for {new_voice['note']}", flush=True)
+    voices.append(new_voice)
+    most_recent_voice = new_voice
+    print(f"PLUCK -> {new_voice['note']} [{source_used}: {note_label}] "
+          f"({target_hz:.1f} Hz, amp={params['amplitude']:.2f}, "
+          f"velocity={velocity:.0f}c/s)", flush=True)
 
 
 def start_jaru(position):
-    global glide
-    v = active_voice
+    """Glides most_recent_voice toward the given key's pitch (nearest
+    octave to that voice's current pitch - see nearest_octave_hz) -
+    always the most recently plucked/jaru'd voice, regardless of how
+    many other voices are independently ringing (one hand does the
+    glide motion; other held notes are unaffected)."""
+    v = most_recent_voice
     _, _, base_hz, source_used, note_label, swara = resolve_position(position)
     target_hz = nearest_octave_hz(base_hz, v['pitch_hz'])
     if target_hz == base_hz:
@@ -669,8 +1003,8 @@ def start_jaru(position):
     else:
         octave_note = 'octave down'
     target_cents = ma.cents_between(v['pitch_hz'], target_hz)
-    current_cents = 1200.0 * np.log2(v['rate'])
-    glide = (current_cents, target_cents, time.monotonic())
+    current_cents = 1200.0 * np.log2(v['jaru_rate'])
+    v['glide'] = (current_cents, target_cents, time.monotonic())
     print(f"JARU -> {v['note']} sliding to key{position + 1}({swara}) ({octave_note}, "
           f"target {target_hz:.1f}Hz, {target_cents:+.1f}c over "
           f"{ma.JARU_GLIDE_SECONDS * 1000:.0f}ms)", flush=True)
@@ -692,6 +1026,12 @@ def stop_drone():
     drone_octave = None
     drone_voice = None
     print("[drone] off", flush=True)
+
+
+def toggle_odukkal():
+    global odukkal_enabled
+    odukkal_enabled = not odukkal_enabled
+    print(f"[odukkal] {'ON' if odukkal_enabled else 'OFF'}", flush=True)
 
 
 def print_mapping():
@@ -718,16 +1058,17 @@ def cycle_source():
 
 def control_listener():
     """Reads lines from stdin: 'b'/'c' for the drone, 'i' for the sample
-    source cycle, 's' for dual output, 'b+'/'b-'/'m+'/'m-'/'t+'/'t-' for the
-    live EQ - typed + Enter, same convention/commands as
-    gamaka_keyboard_mixer.py. Note 't+'/'t-' (treble EQ) are two-character
-    commands, distinct from a bare 't' - there is no bare-'t' command in
-    this file (tanpura was scoped but dropped, see module docstring), so
-    there's no actual collision to resolve; even if there were, this
-    channel (typed + Enter on stdin) is already fully separate from note-
-    key input, which in this file comes from FSRs over SPI, not the
-    keyboard at all. Runs as a daemon thread so a non-interactive stdin
-    (EOF) just ends it quietly."""
+    source cycle, 's' for dual output, 'o' for the odukkal toggle,
+    'b+'/'b-'/'m+'/'m-'/'t+'/'t-' for the live EQ - typed + Enter, same
+    convention/commands as gamaka_keyboard_mixer.py. Note 't+'/'t-'
+    (treble EQ) are two-character commands, distinct from a bare 't' -
+    there is no bare-'t' command in this file (tanpura was scoped but
+    dropped, see module docstring), so there's no actual collision to
+    resolve; likewise 'o' collides with nothing already bound here.
+    Even if there were a collision, this channel (typed + Enter on
+    stdin) is already fully separate from note-key input, which in this
+    file comes from FSRs over SPI, not the keyboard at all. Runs as a
+    daemon thread so a non-interactive stdin (EOF) just ends it quietly."""
     for line in sys.stdin:
         cmd = line.strip().lower()
         if cmd == 'b':
@@ -738,6 +1079,8 @@ def control_listener():
             toggle_dual_output()
         elif cmd == 'i':
             cycle_source()
+        elif cmd == 'o':
+            toggle_odukkal()
         elif cmd in EQ_COMMANDS:
             band, direction = EQ_COMMANDS[cmd]
             adjust_band(band, direction)
@@ -810,6 +1153,8 @@ def poll_octave_keys(raw_up, raw_down, octave_up_state, octave_down_state):
 
 def control_loop():
     pressed = {position: False for position in range(8)}
+    prev_raw = {position: 0 for position in range(8)}  # for attack-velocity
+                                                         # (dF/dt) at press-edge
     gamakam_prev_pressed = False
     octave_up_state = {'count': 0, 'armed': True}
     octave_down_state = {'count': 0, 'armed': True}
@@ -824,16 +1169,44 @@ def control_loop():
                 continue
             raw = read_channel(spi, position)
             now_pressed = raw >= PRESS_THRESHOLD
+
             if now_pressed and not pressed[position]:
-                ringing = active_voice is not None and active_voice['active']
+                velocity = (raw - prev_raw[position]) / CONTROL_INTERVAL
+                ringing = most_recent_voice is not None and most_recent_voice['active']
                 if held and ringing:
                     start_jaru(position)
                 else:
                     if held and not ringing:
                         print(f"(gamakam+key{position + 1}: nothing currently ringing to "
                               f"glide from - plucking instead)", flush=True)
-                    pluck(position)
+                    pluck(position, velocity)
+            elif not now_pressed and pressed[position]:
+                # Release edge: only sustained-mode (flute) voices react -
+                # plucked voices (mandolin/guitar) ring through untouched,
+                # exactly as before this feature existed. Only this
+                # position's own voice is ever released here.
+                voice = find_voice(voices, position)
+                if (voice is not None and voice['active']
+                        and voice['envelope'] == 'sustained' and not voice['releasing']):
+                    voice['releasing'] = True
+                    voice['release_start'] = time.monotonic()
+                    print(f"RELEASE -> {voice['note']} (fading, "
+                          f"{FLUTE_RELEASE_SECONDS * 1000:.0f}ms)", flush=True)
+
+            # Odukkal: only ever this position's own voice from this
+            # position's own raw reading - never another key's voice.
+            voice = find_voice(voices, position)
+            if voice is not None and voice['active']:
+                if odukkal_enabled and now_pressed:
+                    update_odukkal(voice, raw, CONTROL_INTERVAL)
+                else:
+                    voice['odukkal_cents'] = 0.0
+
             pressed[position] = now_pressed
+            prev_raw[position] = raw
+
+        voices[:] = [v for v in voices if v['active']]  # drop naturally-
+                                                          # finished voices
 
         time.sleep(CONTROL_INTERVAL)
 
@@ -910,6 +1283,16 @@ def main():
           "whole instrument's active octave by one, edge-triggered (once per "
           f"press, clamped to +-{OCTAVE_SHIFT_LIMIT}). [octave] {octave_shift:+d}",
           flush=True)
+    print(f"Polyphony: up to {MAX_VOICES} notes ring independently; a key's own "
+          "re-pluck replaces only that key's own prior voice.", flush=True)
+    print("Octave-nearest plucks: Ri/Ga/Ma/Pa/Da/Ni land in whichever octave is "
+          "closest to the last note played (Sa/upper-Sa unaffected - always "
+          "exactly key 1 / key 8).", flush=True)
+    print("Odukkal (pressure->bend): 'o'+Enter toggles 0 to "
+          f"+{ODUKKAL_MAX_CENTS:.0f}c upward bend from sustained pressure on a "
+          "held, ringing key. [odukkal] OFF", flush=True)
+    print("Attack velocity (always on): how fast you press scales pluck "
+          "loudness.", flush=True)
 
     listener_thread = threading.Thread(target=control_listener, daemon=True)
     listener_thread.start()
