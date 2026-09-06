@@ -102,6 +102,21 @@ point picked without per-note listening/tuning risks an audible seam -
 worse than just letting each note play its natural (already fairly
 long) recorded length while held.
 
+NETWORK CONTROL: every toggle/config command (drone, instrument
+source, EQ, dual output, odukkal, volume) is a standalone function
+(toggle_drone, set_source, adjust_band, etc.) with no stdin-specific
+logic - control_listener (stdin) and run_network_server (a WebSocket
+server on NETWORK_PORT, started in its own thread so it never adds
+latency to the real-time SPI/serial control loop) are just two
+different ways a command can ARRIVE, both calling the exact same
+functions and both triggering the exact same broadcast_state() push of
+the full current state to every connected WebSocket client. Full JSON
+protocol (every command, its fields, the state-push shape) is
+documented in PROTOCOL.md - that's the contract to build a client
+against, not this file. See run_network_server's docstring for where a
+future Bluetooth (SPP or BLE GATT - this Pi has it built in) transport
+would plug into this same NETWORK_COMMANDS dispatch layer.
+
 NOTE: an earlier revision of this file used a FIXED Sa-Ri-Ga-Ma-Pa-Da-
 Ni-Sa' diatonic layout (natural-major swara values) instead of raga
 selection. This revision replaces that entirely per updated
@@ -204,11 +219,23 @@ has the full detail; summarized here):
     was considered and deliberately not implemented - see module
     docstring for the reasoning (real vibrato/breath variation in the
     samples' sustain region makes a blind loop point risky).
+  - Network control (run_network_server, NETWORK_COMMANDS, broadcast_
+    state, get_full_state) and master volume (master_volume, set_
+    volume/adjust_volume - no volume control existed before this):
+    NEW in this revision. Refactored set_source out of cycle_source
+    (previously one function that always advanced; now cycle_source is
+    a one-line wrapper over set_source, which the network layer's
+    direct instrument-select command also calls) so every command has
+    exactly one implementation regardless of which transport triggered
+    it. No tanpura toggle exists in the network protocol, matching the
+    module docstring above - there is no tanpura feature in this file
+    to expose.
 
 Usage:
     python3 jaladarangam.py --raga Shankarabharanam
 """
 import argparse
+import asyncio
 import collections
 import json
 import os
@@ -223,6 +250,16 @@ from serial.tools import list_ports
 import spidev
 import mandolin_audio as ma
 from mandolin_audio import SAMPLE_RATE, BLOCKSIZE
+
+try:
+    import websockets
+except ImportError:
+    # Network control degrades gracefully to unavailable - stdin control
+    # (control_listener) still works fully either way. On Debian/Raspberry
+    # Pi OS, `sudo apt install python3-websockets` provides this without
+    # needing pip/venv (this system's Python is externally-managed, PEP
+    # 668) - that's the path this project's Pi actually used.
+    websockets = None
 
 # --- Hardware: all 8 keys physically wired on one MCP3008 (CH0..CH7 =
 # position 0..7). Positions are ALSO the MCP3008 channel numbers directly -
@@ -760,6 +797,12 @@ RAW_BUFFER_LEN = int(SAMPLE_RATE * RAW_BUFFER_SECONDS)
 raw_ring = np.zeros(RAW_BUFFER_LEN, dtype=np.float32)
 raw_ring_pos = 0
 
+# --- Master volume - NEW: no volume control existed before this revision.
+MASTER_VOLUME_MIN = 0.0
+MASTER_VOLUME_MAX = 1.0
+MASTER_VOLUME_STEP = 0.1  # matches the EQ's step-per-command convention
+master_volume = 1.0       # default: unchanged from today's implicit 100%
+
 
 def build_band(name, gain_db):
     if gain_db == 0.0:
@@ -775,7 +818,7 @@ def apply_chain_unclipped(mix, bass_f, mid_f, treble_f):
     for f in (bass_f, mid_f, treble_f):
         if f is not None:
             mix = f.process(mix)
-    return mix * ma.EXISTING_GAIN
+    return mix * ma.EXISTING_GAIN * master_volume
 
 
 def predicted_peak(candidate_gains):
@@ -787,10 +830,15 @@ def predicted_peak(candidate_gains):
     return float(np.max(np.abs(out)))
 
 
-def adjust_band(name, direction):
+def adjust_band(name, steps):
+    """steps is a signed integer number of EQ_STEP_DB increments (not raw
+    dB) - matches the granularity of the physical b+/b-/m+/m-/t+/t-
+    stdin commands (each one step), while allowing a network caller to
+    jump multiple steps in one call (e.g. steps=2 for a slider-driven
+    Android UI). See PROTOCOL.md for the exact network contract."""
     global eq_bass, eq_mid, eq_treble
     candidate = dict(band_gains)
-    candidate[name] = band_gains[name] + direction * EQ_STEP_DB
+    candidate[name] = band_gains[name] + steps * EQ_STEP_DB
     peak = predicted_peak(candidate)
     if peak > 1.0:
         over_db = 20 * np.log10(peak)
@@ -811,6 +859,21 @@ def adjust_band(name, direction):
     print(f"[EQ] bass={band_gains['bass']:+.0f}dB mid={band_gains['mid']:+.0f}dB "
           f"treble={band_gains['treble']:+.0f}dB  peak={peak_db:+.1f}dBFS  "
           f"headroom={headroom_db:.1f}dB", flush=True)
+    broadcast_state()
+
+
+def set_volume(value):
+    global master_volume
+    # round() clears float binary-representation noise (e.g. repeated
+    # +-MASTER_VOLUME_STEP adjustments landing on 0.49999999999999994
+    # instead of 0.5) before it reaches the JSON state push.
+    master_volume = round(max(MASTER_VOLUME_MIN, min(MASTER_VOLUME_MAX, float(value))), 3)
+    print(f"[volume] {master_volume:.2f}", flush=True)
+    broadcast_state()
+
+
+def adjust_volume(steps):
+    set_volume(master_volume + steps * MASTER_VOLUME_STEP)
 
 
 EQ_COMMANDS = {
@@ -818,6 +881,7 @@ EQ_COMMANDS = {
     'm+': ('mid', +1), 'm-': ('mid', -1),
     't+': ('treble', +1), 't-': ('treble', -1),
 }
+VOLUME_COMMANDS = {'v+': +1, 'v-': -1}
 
 # --- Dual output (gamaka_keyboard_mixer.py, unchanged) ---------------------
 HEADPHONE_DEVICE = "bcm2835 Headphones"
@@ -856,6 +920,7 @@ def toggle_dual_output():
         headphone_stream.close()
         headphone_stream = None
         print("[output] I2S only", flush=True)
+    broadcast_state()
 
 
 # --- Playback state ---------------------------------------------------------
@@ -1019,6 +1084,7 @@ def toggle_drone():
         drone_octave = DRONE_OCTAVES[(i + 1) % len(DRONE_OCTAVES)]
     drone_voice = {'samples': DRONE_SAMPLES[drone_octave], 'pos': 0.0, 'rate': 1.0}
     print(f"[drone] C#{drone_octave}", flush=True)
+    broadcast_state()
 
 
 def stop_drone():
@@ -1026,12 +1092,14 @@ def stop_drone():
     drone_octave = None
     drone_voice = None
     print("[drone] off", flush=True)
+    broadcast_state()
 
 
 def toggle_odukkal():
     global odukkal_enabled
     odukkal_enabled = not odukkal_enabled
     print(f"[odukkal] {'ON' if odukkal_enabled else 'OFF'}", flush=True)
+    broadcast_state()
 
 
 def print_mapping():
@@ -1044,31 +1112,55 @@ def print_mapping():
               f"{target_hz:7.1f}Hz  [{source_used}: {note_label}]", flush=True)
 
 
-def cycle_source():
+def set_source(name):
+    """Directly selects sample_source - unlike cycle_source (the stdin
+    'i' command, which only ever advances to the next one), this lets a
+    caller pick any instrument directly (used by the network
+    'set_instrument' command, since a phone app has a picker rather
+    than a single 'next' button). cycle_source is now just a thin
+    wrapper over this, so both paths share the exact same Sa-reset/
+    print/broadcast behavior."""
     global sample_source, sa_note, sa_idx
-    i = SOURCES.index(sample_source)
-    sample_source = SOURCES[(i + 1) % len(SOURCES)]
+    if name not in SOURCES:
+        raise ValueError(f"invalid instrument {name!r}, must be one of {SOURCES}")
+    sample_source = name
     if not sa_explicit:
         sa_note = SOURCE_DEFAULT_SA[sample_source]
         sa_idx = note_to_index(sa_note)
     print(f"[source] {sample_source}" +
           ("" if sa_explicit else f"  (Sa auto-reset to {sa_note})"), flush=True)
     print_mapping()
+    broadcast_state()
+
+
+def cycle_source():
+    i = SOURCES.index(sample_source)
+    set_source(SOURCES[(i + 1) % len(SOURCES)])
 
 
 def control_listener():
     """Reads lines from stdin: 'b'/'c' for the drone, 'i' for the sample
     source cycle, 's' for dual output, 'o' for the odukkal toggle,
-    'b+'/'b-'/'m+'/'m-'/'t+'/'t-' for the live EQ - typed + Enter, same
-    convention/commands as gamaka_keyboard_mixer.py. Note 't+'/'t-'
-    (treble EQ) are two-character commands, distinct from a bare 't' -
-    there is no bare-'t' command in this file (tanpura was scoped but
-    dropped, see module docstring), so there's no actual collision to
-    resolve; likewise 'o' collides with nothing already bound here.
-    Even if there were a collision, this channel (typed + Enter on
-    stdin) is already fully separate from note-key input, which in this
-    file comes from FSRs over SPI, not the keyboard at all. Runs as a
-    daemon thread so a non-interactive stdin (EOF) just ends it quietly."""
+    'b+'/'b-'/'m+'/'m-'/'t+'/'t-' for the live EQ, 'v+'/'v-' for volume -
+    typed + Enter, same convention/commands as gamaka_keyboard_mixer.py.
+    Note 't+'/'t-' (treble EQ) are two-character commands, distinct from
+    a bare 't' - there is no bare-'t' command in this file (tanpura was
+    scoped but dropped, see module docstring), so there's no actual
+    collision to resolve; likewise 'o' and 'v+'/'v-' collide with
+    nothing already bound here. Even if there were a collision, this
+    channel (typed + Enter on stdin) is already fully separate from
+    note-key input, which in this file comes from FSRs over SPI, not
+    the keyboard at all. Runs as a daemon thread so a non-interactive
+    stdin (EOF) just ends it quietly.
+
+    This function is now a thin dispatcher only - every command it
+    handles is a plain, standalone function (toggle_drone, adjust_band,
+    etc.) with no stdin-specific logic in it, and each one calls
+    broadcast_state() itself. run_network_server's WebSocket layer
+    calls the exact same functions through NETWORK_COMMANDS, so stdin
+    and network commands are indistinguishable once they reach this
+    layer - a future Bluetooth transport (see run_network_server's
+    docstring) would plug in the same way a third time."""
     for line in sys.stdin:
         cmd = line.strip().lower()
         if cmd == 'b':
@@ -1082,8 +1174,229 @@ def control_listener():
         elif cmd == 'o':
             toggle_odukkal()
         elif cmd in EQ_COMMANDS:
-            band, direction = EQ_COMMANDS[cmd]
-            adjust_band(band, direction)
+            band, steps = EQ_COMMANDS[cmd]
+            adjust_band(band, steps)
+        elif cmd in VOLUME_COMMANDS:
+            adjust_volume(VOLUME_COMMANDS[cmd])
+
+
+# --- Network control (WiFi/WebSocket now; Bluetooth later) ------------------
+# Full JSON protocol documented in PROTOCOL.md - that's the contract an
+# Android (or any other) client is built against, not this file's
+# comments. Every command here calls the exact same standalone functions
+# stdin calls (toggle_drone, adjust_band, set_source, ...) - this module
+# never has two implementations of what a command DOES, only two ways a
+# command can ARRIVE (typed + Enter on stdin, or {"cmd": ...} JSON over
+# WebSocket). See run_network_server's docstring for where a future
+# Bluetooth transport (this Pi has built-in BT 4.1 Classic+BLE) would
+# plug into this exact same layer.
+NETWORK_HOST = '0.0.0.0'   # listen on all interfaces, not just localhost,
+                           # so the LAN IP (check with `hostname -I` on
+                           # the Pi - not hardcoded/assumed stable here,
+                           # same reasoning as find_nano_port) is reachable
+NETWORK_PORT = 8765        # websockets' own conventional example port;
+                           # confirmed free on this Pi before choosing it
+
+_ws_clients = set()  # currently-connected websocket connections
+_ws_loop = None      # the asyncio event loop run_network_server is
+                     # running on, set once at startup - broadcast_state()
+                     # (called from ANY thread: stdin, control_loop, or
+                     # the network thread itself) uses this to safely
+                     # hand work to that loop via run_coroutine_threadsafe
+
+
+def get_full_state():
+    """The single source of truth for 'what does the instrument look
+    like right now' - sent to a client on connect, on an explicit
+    get_state request, and broadcast to all clients after every command
+    (see broadcast_state) regardless of whether that command arrived
+    over stdin or the network. Keep this in sync with whatever state
+    PROTOCOL.md documents as the state-push shape."""
+    return {
+        'instrument': sample_source,
+        'sa_note': sa_note,
+        'octave_shift': octave_shift,
+        'drone': {'on': drone_octave is not None, 'octave': drone_octave},
+        'eq': dict(band_gains),
+        'odukkal': odukkal_enabled,
+        'dual_output': dual_output_enabled,
+        'volume': master_volume,
+    }
+
+
+def broadcast_state():
+    """Pushes the current full state to every connected WebSocket client.
+    Safe to call from ANY thread (the main thread's control_loop, the
+    stdin thread, or the network thread itself) - schedules the actual
+    send onto the network thread's event loop via
+    run_coroutine_threadsafe rather than touching asyncio/websockets
+    objects directly from a foreign thread. A no-op if the network layer
+    never started (websockets not installed) or nothing's connected."""
+    if _ws_loop is None or not _ws_clients:
+        return
+    asyncio.run_coroutine_threadsafe(_broadcast_state_async(), _ws_loop)
+
+
+async def _broadcast_state_async():
+    if not _ws_clients:
+        return
+    message = json.dumps({'type': 'state', 'state': get_full_state()})
+    websockets.broadcast(_ws_clients, message)
+
+
+def _network_toggle_drone(data):
+    toggle_drone()
+
+
+def _network_stop_drone(data):
+    stop_drone()
+
+
+def _network_toggle_dual_output(data):
+    toggle_dual_output()
+
+
+def _network_cycle_instrument(data):
+    cycle_source()
+
+
+def _network_set_instrument(data):
+    set_source(data.get('value'))
+
+
+def _network_toggle_odukkal(data):
+    toggle_odukkal()
+
+
+def _coerce_int_delta(value, label):
+    """JSON doesn't distinguish '2' from '2.0' as strongly as Python
+    does, so accept either and reject only genuinely fractional/non-
+    numeric values - avoids rejecting a perfectly reasonable request
+    just because some JSON encoder always emits floats."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not float(value).is_integer():
+        raise ValueError(f"{label} must be a whole number, not {value!r}")
+    return int(value)
+
+
+def _network_set_eq(data):
+    band = data.get('band')
+    if band not in band_gains:
+        raise ValueError(f"invalid band {band!r}, must be one of {sorted(band_gains)}")
+    steps = _coerce_int_delta(data.get('delta'),
+                              f"delta (in {EQ_STEP_DB:.0f}dB steps)")
+    adjust_band(band, steps)
+
+
+def _network_set_volume(data):
+    value = data.get('value')
+    if not isinstance(value, (int, float)):
+        raise ValueError(f"value must be a number 0.0-1.0, not {value!r}")
+    set_volume(value)
+
+
+def _network_adjust_volume(data):
+    steps = _coerce_int_delta(data.get('delta'), "delta (in volume steps)")
+    adjust_volume(steps)
+
+
+NETWORK_COMMANDS = {
+    'toggle_drone': _network_toggle_drone,
+    'stop_drone': _network_stop_drone,
+    'toggle_dual_output': _network_toggle_dual_output,
+    'cycle_instrument': _network_cycle_instrument,
+    'set_instrument': _network_set_instrument,
+    'toggle_odukkal': _network_toggle_odukkal,
+    'set_eq': _network_set_eq,
+    'set_volume': _network_set_volume,
+    'adjust_volume': _network_adjust_volume,
+    # 'get_state' is intentionally NOT in this table - it changes no
+    # state (nothing to broadcast), so it's handled as a direct-reply
+    # special case below instead, unlike every other command here.
+}
+
+
+async def _handle_ws_message(websocket, raw_message):
+    """Every state-CHANGING command below is handled purely through the
+    broadcast the underlying function (toggle_drone, adjust_band, etc.)
+    already triggers via broadcast_state() - that broadcast reaches the
+    sender too, since it's a member of _ws_clients like any other
+    connected client, so there is deliberately NO separate direct reply
+    for the success case. (An earlier version of this function DID send
+    a separate direct reply in addition to the broadcast; with only one
+    client, both messages went to the same socket and interleaved with
+    the next broadcast in a way that made replies consistently lag one
+    command behind. Sending state exactly once per change removes the
+    ambiguity entirely.) get_state and error responses are the only
+    direct, per-client replies, since neither of those represents a
+    broadcast-worthy state change."""
+    try:
+        data = json.loads(raw_message)
+        cmd = data['cmd']
+    except (json.JSONDecodeError, KeyError, TypeError):
+        await websocket.send(json.dumps({'type': 'error', 'message': 'expected JSON object with a "cmd" field'}))
+        return
+    if cmd == 'get_state':
+        await websocket.send(json.dumps({'type': 'state', 'state': get_full_state()}))
+        return
+    handler = NETWORK_COMMANDS.get(cmd)
+    if handler is None:
+        await websocket.send(json.dumps(
+            {'type': 'error', 'message': f'unknown cmd {cmd!r} - see PROTOCOL.md'}))
+        return
+    try:
+        handler(data)
+    except Exception as e:
+        await websocket.send(json.dumps({'type': 'error', 'message': str(e)}))
+
+
+async def _ws_handler(websocket):
+    _ws_clients.add(websocket)
+    print(f"[network] client connected ({websocket.remote_address}); "
+          f"{len(_ws_clients)} total", flush=True)
+    try:
+        await websocket.send(json.dumps({'type': 'state', 'state': get_full_state()}))
+        async for raw_message in websocket:
+            await _handle_ws_message(websocket, raw_message)
+    except websockets.exceptions.ConnectionClosed:
+        pass
+    finally:
+        _ws_clients.discard(websocket)
+        print(f"[network] client disconnected ({websocket.remote_address}); "
+              f"{len(_ws_clients)} total", flush=True)
+
+
+def run_network_server():
+    """Runs the WebSocket server's own asyncio event loop in this thread
+    (started as a daemon thread from main - see there) - fully separate
+    from control_loop's real-time SPI/serial polling in the main thread,
+    so nothing here can add latency to note reading regardless of how
+    many clients connect or how much traffic they send.
+
+    FUTURE BLUETOOTH (not implemented here - see task scope): this Pi
+    has built-in Bluetooth 4.1 Classic+BLE, no dongle needed. A future
+    SPP or BLE GATT transport would plug in at exactly this level: run
+    its own accept/read loop (in its own thread, same as this function),
+    decode whatever bytes arrive into the same {"cmd": ..., ...} JSON
+    shape, and dispatch through NETWORK_COMMANDS exactly like
+    _handle_ws_message does above - then call get_full_state()/
+    broadcast_state() the same way for its own connected client(s). The
+    JSON protocol and NETWORK_COMMANDS dispatch table are already fully
+    transport-agnostic; only the bytes-in/bytes-out plumbing would be new."""
+    global _ws_loop
+    if websockets is None:
+        print("[network] 'websockets' package not available - network "
+              "control disabled (stdin control is unaffected).", flush=True)
+        return
+    _ws_loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(_ws_loop)
+
+    async def _serve():
+        async with websockets.serve(_ws_handler, NETWORK_HOST, NETWORK_PORT):
+            print(f"[network] WebSocket server listening on ws://<pi-ip>:{NETWORK_PORT} "
+                  f"(run `hostname -I` on the Pi for its current LAN IP)", flush=True)
+            await asyncio.Future()  # run forever
+
+    _ws_loop.run_until_complete(_serve())
 
 
 def poll_gamakam(raw, prev_pressed):
@@ -1293,9 +1606,14 @@ def main():
           "held, ringing key. [odukkal] OFF", flush=True)
     print("Attack velocity (always on): how fast you press scales pluck "
           "loudness.", flush=True)
+    print(f"Volume: 'v+'/'v-'+Enter, {MASTER_VOLUME_STEP:.1f}/step "
+          f"[{MASTER_VOLUME_MIN:.1f}-{MASTER_VOLUME_MAX:.1f}]. [volume] {master_volume:.2f}",
+          flush=True)
 
     listener_thread = threading.Thread(target=control_listener, daemon=True)
     listener_thread.start()
+    network_thread = threading.Thread(target=run_network_server, daemon=True)
+    network_thread.start()
 
     try:
         with sd.OutputStream(samplerate=SAMPLE_RATE, blocksize=BLOCKSIZE, channels=1,

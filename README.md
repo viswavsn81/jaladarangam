@@ -207,13 +207,19 @@ until then, leave that channel's row in the table above as "unpopulated."
   shift, resampled to 48000Hz to match this Pi's PipeWire audio graph quantum.
 - `jaladarangam.py` — the current real hardware-driven instrument. Reads all 8
   physical note-key FSRs on ADC1 (CH0-CH7 = Sa..Sa'), with raga-selectable
-  positional layout (`--raga`), mandolin/guitar/flute instrument switching,
-  octave-aware jaru (glide) with the keyboard spacebar standing in for the
-  not-yet-wired gamakam key, the double bass drone, a live 3-band EQ, and dual
-  I2S+headphone output. Known limitations: only the Sa->Ri jaru direction has
-  been validated against real hardware — other key-to-key jaru pairs and
-  octave-down landings are implemented but untested; a tanpura drone was
-  scoped but is **not implemented** (no CC0/permissive-license sample could be
+  positional layout (`--raga`), polyphony (up to 8 notes ringing
+  independently), mandolin/guitar/flute instrument switching with
+  per-instrument envelopes (flute stops promptly on release; mandolin/guitar
+  ring through their natural decay), octave-aware jaru (glide) and octave-
+  nearest note selection, gamakam/octave+/octave- read from an Arduino Nano
+  33 BLE over USB serial (see `control_keys/control_keys.ino`), odukkal
+  (pressure-to-pitch-bend, toggleable), attack velocity, the double bass
+  drone, a live 3-band EQ, master volume, and dual I2S+headphone output. All
+  of the above is controllable both via typed stdin commands and remotely
+  over a WebSocket network control interface — see **[PROTOCOL.md](PROTOCOL.md)**
+  for the full JSON command/state protocol (the contract for building a
+  remote-control app against). Known limitation: a tanpura drone was scoped
+  but is **not implemented** (no CC0/permissive-license sample could be
   sourced that was also actually downloadable — a Freesound recording was
   gated behind account login, and a Pixabay mirror of it was blocked by
   Cloudflare bot-protection from this environment's tools). Usage:
