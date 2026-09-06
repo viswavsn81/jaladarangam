@@ -7,12 +7,14 @@ upper Sa), read through an MCP3008 ADC over SPI. An earlier hardware iteration u
 2 FSRs plus a SparkFun SoftPot ribbon for continuous glide; that layout was replaced
 by the 8 discrete note keys below, and the SoftPot has since been removed entirely.
 
-The project's original design calls for two MCP3008 chips sharing one SPI0 bus
+The project's original design called for two MCP3008 chips sharing one SPI0 bus
 (distinguished by chip-select line): **ADC1** for the 8 note-key FSRs, and **ADC2**
 for the gamakam/octave-up/octave-down control keys. ADC1 is documented and wired
-below. ADC2's wiring is documented in [ADC2 (control keys)](#adc2--control-keys)
-below; as of this writing it is still being physically wired and has no software
-support yet (see that section for exact status).
+below and is the only MCP3008 in the current build. **ADC2 was built, found to
+have an unresolved hardware fault, and has been fully replaced** by an Arduino
+Nano 33 BLE reading the three control keys directly over USB serial — see
+[STATUS.md](STATUS.md) for the current project state and [ADC2 (control keys)](#adc2--control-keys)
+below for the (now superseded) ADC2 wiring record.
 
 ## Hardware
 
@@ -94,20 +96,25 @@ so the sense-node voltage *rises* with force.
 8. Once wired, enable SPI on the Pi (`sudo raspi-config nonint do_spi 0`) if not already
    enabled, then reboot before trying to read the MCP3008.
 
-## ADC2 (control keys)
+## ADC2 (control keys) — SUPERSEDED, kept for historical/wiring reference only
 
-**Status as of this writing:** ADC2 is not yet on the bus at all — no chip, no CE1,
-no channels. This section is the build spec to wire it, not a record of something
-already done. Update this status line once the chip is seated and again as
-individual control-key FSRs get populated, so it always reflects "wired to Pi,
-channels unpopulated" vs. specific live channels rather than assuming all three
-control keys are connected just because the chip is on the bus.
+**This entire section describes an abandoned hardware path.** ADC2 was
+physically wired per the plan below, then extensively fault-tested (FSR
+swaps, pulldown/ground checks, chip-select swaps, physical chip swaps) after
+every channel — including one never wired to anything — read an identical
+fixed value no matter what changed. That combination of tests pointed at the
+MCP3008 chip/circuit itself, not the wiring, so ADC2 was retired rather than
+debugged further. **The three control keys (gamakam, octave+, octave-) are
+now read by an Arduino Nano 33 BLE over USB serial instead** — see
+[STATUS.md](STATUS.md) and `control_keys/control_keys.ino`. No code in this
+repo reads ADC2/CE1. The wiring plan below is left intact only as a record
+of what was built and why it didn't work, in case the physical MCP3008/
+breadboard setup is ever revisited.
 
 ADC2 is a second MCP3008 sharing the same SPI0 bus as ADC1 (same CLK/DIN/DOUT,
 same power/ground rails), distinguished by its own hardware chip-select line
 (CE1 instead of ADC1's CE0). It carries the three control keys — gamakam,
 octave+, octave- — reserved from the original two-chip instrument design.
-**No software reads ADC2 yet** — see [Software](#software) below.
 
 ### Shared bus (Pi -> ADC2)
 
@@ -215,28 +222,32 @@ until then, leave that channel's row in the table above as "unpopulated."
   33 BLE over USB serial (see `control_keys/control_keys.ino`), odukkal
   (pressure-to-pitch-bend, toggleable), attack velocity, the double bass
   drone, a live 3-band EQ, master volume, and dual I2S+headphone output. All
-  of the above is controllable both via typed stdin commands and remotely
-  over a WebSocket network control interface — see **[PROTOCOL.md](PROTOCOL.md)**
-  for the full JSON command/state protocol (the contract for building a
-  remote-control app against). Known limitation: a tanpura drone was scoped
+  of the above is controllable via typed stdin commands, a WiFi WebSocket
+  server (port 8765), and a Bluetooth Classic SPP connection (no PIN
+  pairing) — all three dispatch through the same command layer, both
+  network transports run persistently via systemd
+  (`systemd/jaladarangam.service`), and both are documented in full in
+  **[PROTOCOL.md](PROTOCOL.md)** (the contract for building a remote-control
+  app against). Known limitation: a tanpura drone was scoped
   but is **not implemented** (no CC0/permissive-license sample could be
   sourced that was also actually downloadable — a Freesound recording was
   gated behind account login, and a Pixabay mirror of it was blocked by
   Cloudflare bot-protection from this environment's tools). Usage:
   `python3 jaladarangam.py --raga Shankarabharanam`.
 
-### ADC2 / control-key software support (not yet implemented)
+### Control-key software support (superseded — now via Arduino Nano, not ADC2)
 
-`jaladarangam.py` reads only ADC1 (CE0) — it does not open or read ADC2 (CE1)
-at all. The gamakam key is stood in by the keyboard spacebar (see
-`poll_gamakam_input`); there is no octave+/octave- control-key handling in the
-file at all yet. ADC2 is wired at the hardware level (see the ADC2 section
-above) but not yet integrated into any script's code — wiring the chip is a
-prerequisite for that future software work, not a sign it's under way.
+`jaladarangam.py` reads only ADC1 (CE0) for note keys — no code in this repo
+opens or reads ADC2 (CE1) at all, since ADC2 was retired (see above). The
+gamakam/octave+/octave- control keys are real hardware today, but read from
+an Arduino Nano 33 BLE over USB serial (`poll_nano_values`), not from ADC2 or
+any keyboard stand-in. See [STATUS.md](STATUS.md) for the current summary and
+`control_keys/control_keys.ino` for the Nano's own firmware.
 
-`gamaka.py`, `read_fsr_raw.py`, and `fsr_oscillator.py` also each open a single
-spidev bus (ADC1/CE0 only) with no CE1/ADC2 handling. The keyboard-based
-prototypes (`sliding_window_raga.py`, `gamaka_keyboard.py`,
-`gamaka_keyboard_mixer.py`) stand in for control keys with keyboard input
-(e.g. spacebar for gamakam, bracket keys for octave up/down) and don't touch
-spidev at all.
+`gamaka.py`, `read_fsr_raw.py`, and `fsr_oscillator.py` each open a single
+spidev bus (ADC1/CE0 only) with no CE1/ADC2 handling, and are unrelated to
+`jaladarangam.py`'s Nano integration. The keyboard-based prototypes
+(`sliding_window_raga.py`, `gamaka_keyboard.py`, `gamaka_keyboard_mixer.py`)
+stand in for control keys with keyboard input (e.g. spacebar for gamakam,
+bracket keys for octave up/down) and don't touch spidev at all — these are
+separate, earlier scripts, left unchanged.
