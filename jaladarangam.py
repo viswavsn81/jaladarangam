@@ -105,17 +105,19 @@ long) recorded length while held.
 NETWORK CONTROL: every toggle/config command (drone, instrument
 source, EQ, dual output, odukkal, volume) is a standalone function
 (toggle_drone, set_source, adjust_band, etc.) with no stdin-specific
-logic - control_listener (stdin) and run_network_server (a WebSocket
-server on NETWORK_PORT, started in its own thread so it never adds
-latency to the real-time SPI/serial control loop) are just two
-different ways a command can ARRIVE, both calling the exact same
-functions and both triggering the exact same broadcast_state() push of
-the full current state to every connected WebSocket client. Full JSON
-protocol (every command, its fields, the state-push shape) is
+logic - control_listener (stdin), run_network_server (WiFi, a
+WebSocket server on NETWORK_PORT), and run_bluetooth_server (a
+Bluetooth SPP/RFCOMM server, "Just Works"/no-PIN pairing) are three
+different ways a command can ARRIVE, each in its own thread so none of
+control_loop's real-time SPI/serial polling, the WiFi asyncio loop, or
+the Bluetooth D-Bus/GLib loop can block each other. All three funnel
+through the same _dispatch_command/NETWORK_COMMANDS layer and every
+one triggers the exact same broadcast_state() push of the full current
+state to every connected client on BOTH network transports, regardless
+of which transport (or stdin) triggered the change. Full JSON protocol
+(every command, its fields, the state-push shape, both transports) is
 documented in PROTOCOL.md - that's the contract to build a client
-against, not this file. See run_network_server's docstring for where a
-future Bluetooth (SPP or BLE GATT - this Pi has it built in) transport
-would plug into this same NETWORK_COMMANDS dispatch layer.
+against, not this file.
 
 NOTE: an earlier revision of this file used a FIXED Sa-Ri-Ga-Ma-Pa-Da-
 Ni-Sa' diatonic layout (natural-major swara values) instead of raga
@@ -230,6 +232,23 @@ has the full detail; summarized here):
     it. No tanpura toggle exists in the network protocol, matching the
     module docstring above - there is no tanpura feature in this file
     to expose.
+  - Bluetooth SPP transport (run_bluetooth_server, _BluetoothProfile,
+    _BluetoothAgent, _handle_bt_client) and the _dispatch_command
+    refactor it required: NEW in this revision. _dispatch_command was
+    factored out of what used to be _handle_ws_message's body so both
+    the WebSocket and Bluetooth handlers call one shared implementation
+    instead of two copies of the same JSON-parsing/NETWORK_COMMANDS-
+    lookup/error-formatting logic - this is also what "reuse
+    NETWORK_COMMANDS directly" meant in practice, not just dispatching
+    through the same table but sharing the code around it too. Uses
+    dbus-python + PyGObject's GLib (both already on Raspberry Pi OS) to
+    talk to BlueZ's own D-Bus API, not PyBluez - see run_bluetooth_
+    server's docstring for why (PyBluez is unmaintained; the classic
+    sdptool-based approach doesn't work on this system's BlueZ at all).
+    broadcast_state was generalized from WebSocket-only to fan out to
+    both transports (_broadcast_ws_async, _broadcast_bt) - a Bluetooth
+    client sees a state change made from WiFi or stdin exactly as
+    promptly as a WebSocket client would, and vice versa.
 
 Usage:
     python3 jaladarangam.py --raga Shankarabharanam
@@ -239,6 +258,7 @@ import asyncio
 import collections
 import json
 import os
+import socket
 import sys
 import threading
 import time
@@ -260,6 +280,27 @@ except ImportError:
     # needing pip/venv (this system's Python is externally-managed, PEP
     # 668) - that's the path this project's Pi actually used.
     websockets = None
+
+try:
+    import dbus
+    import dbus.mainloop.glib
+    import dbus.service
+    from gi.repository import GLib
+except ImportError:
+    # Bluetooth control degrades gracefully to unavailable, same as
+    # websockets above - stdin and WiFi control are unaffected. PyBluez
+    # (the obvious first guess) was deliberately NOT used here: it's
+    # packaged for Debian/Raspberry Pi OS (`python3-bluez`) but that
+    # package is literally PyBluez's last-ever upstream release (0.23,
+    # ~2018) with no real maintenance since. dbus-python + PyGObject's
+    # GLib (both already present on Raspberry Pi OS - no extra install
+    # needed) talking to BlueZ's own D-Bus API is the current, actually-
+    # maintained way to do this; the legacy sdptool/hciconfig approach
+    # some older PyBluez tutorials use doesn't work on this system at
+    # all (bluetoothd runs without --compat, confirmed via `sdptool
+    # browse local` failing outright).
+    dbus = None
+    GLib = None
 
 # --- Hardware: all 8 keys physically wired on one MCP3008 (CH0..CH7 =
 # position 0..7). Positions are ALSO the MCP3008 channel numbers directly -
@@ -1180,16 +1221,18 @@ def control_listener():
             adjust_volume(VOLUME_COMMANDS[cmd])
 
 
-# --- Network control (WiFi/WebSocket now; Bluetooth later) ------------------
+# --- Network control (WiFi/WebSocket and Bluetooth SPP) ---------------------
 # Full JSON protocol documented in PROTOCOL.md - that's the contract an
 # Android (or any other) client is built against, not this file's
 # comments. Every command here calls the exact same standalone functions
 # stdin calls (toggle_drone, adjust_band, set_source, ...) - this module
-# never has two implementations of what a command DOES, only two ways a
-# command can ARRIVE (typed + Enter on stdin, or {"cmd": ...} JSON over
-# WebSocket). See run_network_server's docstring for where a future
-# Bluetooth transport (this Pi has built-in BT 4.1 Classic+BLE) would
-# plug into this exact same layer.
+# never has two implementations of what a command DOES, only different
+# ways a command can ARRIVE (typed + Enter on stdin, {"cmd": ...} JSON
+# over a WebSocket, or the identical JSON newline-terminated over a
+# Bluetooth SPP/RFCOMM connection - see run_bluetooth_server). All three
+# funnel through _dispatch_command/NETWORK_COMMANDS, and every one of
+# them reaches broadcast_state(), which pushes to every connected client
+# on BOTH network transports regardless of which one triggered the change.
 NETWORK_HOST = '0.0.0.0'   # listen on all interfaces, not just localhost,
                            # so the LAN IP (check with `hostname -I` on
                            # the Pi - not hardcoded/assumed stable here,
@@ -1201,17 +1244,27 @@ _ws_clients = set()  # currently-connected websocket connections
 _ws_loop = None      # the asyncio event loop run_network_server is
                      # running on, set once at startup - broadcast_state()
                      # (called from ANY thread: stdin, control_loop, or
-                     # the network thread itself) uses this to safely
-                     # hand work to that loop via run_coroutine_threadsafe
+                     # either network thread) uses this to safely hand
+                     # work to that loop via run_coroutine_threadsafe
+
+_bt_clients = set()             # currently-connected Bluetooth RFCOMM sockets
+_bt_clients_lock = threading.Lock()  # RFCOMM sockets are plain blocking
+                                      # sockets handled by ordinary threads,
+                                      # not asyncio, so - unlike _ws_clients,
+                                      # which is only ever touched from the
+                                      # single asyncio-loop thread - this
+                                      # set can have real concurrent writers
+                                      # (each connected client's own reader
+                                      # thread) and needs its own lock
 
 
 def get_full_state():
     """The single source of truth for 'what does the instrument look
     like right now' - sent to a client on connect, on an explicit
-    get_state request, and broadcast to all clients after every command
-    (see broadcast_state) regardless of whether that command arrived
-    over stdin or the network. Keep this in sync with whatever state
-    PROTOCOL.md documents as the state-push shape."""
+    get_state request, and broadcast to all clients on every transport
+    after every command (see broadcast_state) regardless of whether that
+    command arrived over stdin, WiFi, or Bluetooth. Keep this in sync
+    with whatever state PROTOCOL.md documents as the state-push shape."""
     return {
         'instrument': sample_source,
         'sa_note': sa_note,
@@ -1225,23 +1278,39 @@ def get_full_state():
 
 
 def broadcast_state():
-    """Pushes the current full state to every connected WebSocket client.
-    Safe to call from ANY thread (the main thread's control_loop, the
-    stdin thread, or the network thread itself) - schedules the actual
-    send onto the network thread's event loop via
-    run_coroutine_threadsafe rather than touching asyncio/websockets
-    objects directly from a foreign thread. A no-op if the network layer
-    never started (websockets not installed) or nothing's connected."""
-    if _ws_loop is None or not _ws_clients:
-        return
-    asyncio.run_coroutine_threadsafe(_broadcast_state_async(), _ws_loop)
+    """Pushes the current full state to every connected client on EVERY
+    transport (WebSocket and Bluetooth SPP) - whatever changed, however
+    the command that changed it arrived. Safe to call from ANY thread:
+    WebSocket clients are reached via run_coroutine_threadsafe (never
+    touching asyncio/websockets objects directly from a foreign thread);
+    Bluetooth clients are reached via a plain, lock-guarded socket write
+    (see _bt_clients_lock). A silent no-op wherever a given transport
+    never started (its library wasn't available) or has no clients."""
+    message = json.dumps({'type': 'state', 'state': get_full_state()})
+    if _ws_loop is not None and _ws_clients:
+        asyncio.run_coroutine_threadsafe(_broadcast_ws_async(message), _ws_loop)
+    _broadcast_bt(message)
 
 
-async def _broadcast_state_async():
+async def _broadcast_ws_async(message):
     if not _ws_clients:
         return
-    message = json.dumps({'type': 'state', 'state': get_full_state()})
     websockets.broadcast(_ws_clients, message)
+
+
+def _broadcast_bt(message):
+    if not _bt_clients:
+        return
+    data = (message + '\n').encode()
+    with _bt_clients_lock:
+        dead = []
+        for sock in _bt_clients:
+            try:
+                sock.sendall(data)
+            except OSError:
+                dead.append(sock)
+        for sock in dead:
+            _bt_clients.discard(sock)
 
 
 def _network_toggle_drone(data):
@@ -1315,38 +1384,45 @@ NETWORK_COMMANDS = {
 }
 
 
-async def _handle_ws_message(websocket, raw_message):
-    """Every state-CHANGING command below is handled purely through the
-    broadcast the underlying function (toggle_drone, adjust_band, etc.)
-    already triggers via broadcast_state() - that broadcast reaches the
-    sender too, since it's a member of _ws_clients like any other
-    connected client, so there is deliberately NO separate direct reply
-    for the success case. (An earlier version of this function DID send
-    a separate direct reply in addition to the broadcast; with only one
-    client, both messages went to the same socket and interleaved with
-    the next broadcast in a way that made replies consistently lag one
-    command behind. Sending state exactly once per change removes the
-    ambiguity entirely.) get_state and error responses are the only
-    direct, per-client replies, since neither of those represents a
-    broadcast-worthy state change."""
+def _dispatch_command(raw_message):
+    """The ONE place command dispatch happens, regardless of transport -
+    WebSocket (_handle_ws_message) and Bluetooth SPP (_handle_bt_client)
+    both call this instead of each reimplementing JSON parsing/
+    NETWORK_COMMANDS lookup/error formatting independently. Returns a
+    dict to send back directly to ONLY the client that sent raw_message
+    (an error, or the get_state reply), or None if nothing should be
+    sent directly - a successful state-changing command's own
+    broadcast_state() call (fired from inside toggle_drone/adjust_band/
+    etc.) is the only response needed, reaching the sender the same way
+    it reaches every other connected client on every transport. (An
+    earlier version sent a separate direct reply in addition to the
+    broadcast for the WebSocket case specifically; with only one client,
+    both messages went to the same socket and interleaved in a way that
+    made replies consistently lag one command behind. Sending state
+    exactly once per change removes the ambiguity entirely - this is
+    also why get_state and errors, which are genuinely direct-reply-only
+    with nothing to broadcast, stay clearly separate from that path.)"""
     try:
         data = json.loads(raw_message)
         cmd = data['cmd']
     except (json.JSONDecodeError, KeyError, TypeError):
-        await websocket.send(json.dumps({'type': 'error', 'message': 'expected JSON object with a "cmd" field'}))
-        return
+        return {'type': 'error', 'message': 'expected JSON object with a "cmd" field'}
     if cmd == 'get_state':
-        await websocket.send(json.dumps({'type': 'state', 'state': get_full_state()}))
-        return
+        return {'type': 'state', 'state': get_full_state()}
     handler = NETWORK_COMMANDS.get(cmd)
     if handler is None:
-        await websocket.send(json.dumps(
-            {'type': 'error', 'message': f'unknown cmd {cmd!r} - see PROTOCOL.md'}))
-        return
+        return {'type': 'error', 'message': f'unknown cmd {cmd!r} - see PROTOCOL.md'}
     try:
         handler(data)
     except Exception as e:
-        await websocket.send(json.dumps({'type': 'error', 'message': str(e)}))
+        return {'type': 'error', 'message': str(e)}
+    return None
+
+
+async def _handle_ws_message(websocket, raw_message):
+    reply = _dispatch_command(raw_message)
+    if reply is not None:
+        await websocket.send(json.dumps(reply))
 
 
 async def _ws_handler(websocket):
@@ -1370,18 +1446,10 @@ def run_network_server():
     (started as a daemon thread from main - see there) - fully separate
     from control_loop's real-time SPI/serial polling in the main thread,
     so nothing here can add latency to note reading regardless of how
-    many clients connect or how much traffic they send.
-
-    FUTURE BLUETOOTH (not implemented here - see task scope): this Pi
-    has built-in Bluetooth 4.1 Classic+BLE, no dongle needed. A future
-    SPP or BLE GATT transport would plug in at exactly this level: run
-    its own accept/read loop (in its own thread, same as this function),
-    decode whatever bytes arrive into the same {"cmd": ..., ...} JSON
-    shape, and dispatch through NETWORK_COMMANDS exactly like
-    _handle_ws_message does above - then call get_full_state()/
-    broadcast_state() the same way for its own connected client(s). The
-    JSON protocol and NETWORK_COMMANDS dispatch table are already fully
-    transport-agnostic; only the bytes-in/bytes-out plumbing would be new."""
+    many clients connect or how much traffic they send. See
+    run_bluetooth_server for the Bluetooth SPP transport, which runs in
+    its own separate thread the same way and shares _dispatch_command/
+    NETWORK_COMMANDS with this one."""
     global _ws_loop
     if websockets is None:
         print("[network] 'websockets' package not available - network "
@@ -1397,6 +1465,217 @@ def run_network_server():
             await asyncio.Future()  # run forever
 
     _ws_loop.run_until_complete(_serve())
+
+
+# --- Bluetooth SPP (RFCOMM) transport ---------------------------------------
+# Same NETWORK_COMMANDS/_dispatch_command layer as the WebSocket transport
+# above - see the "Network control" section header comment. Framing over
+# this raw stream socket (no WebSocket-style message boundaries) is
+# newline-delimited JSON, one command/reply per line - the same
+# convention poll_nano_values already uses for the Arduino Nano's serial
+# link, for the same reason (a plain byte stream needs an explicit
+# message boundary).
+BT_ADAPTER_PATH = '/org/bluez/hci0'
+BT_ADAPTER_ALIAS = 'Jaladarangam'  # friendly name shown to a phone while
+                                   # scanning/pairing, instead of this
+                                   # Pi's generic hostname
+BT_SPP_UUID = '00001101-0000-1000-8000-00805f9b34fb'  # the standard,
+                                                       # well-known Serial
+                                                       # Port Profile UUID
+                                                       # - any generic SPP
+                                                       # terminal app looks
+                                                       # for exactly this
+BT_PROFILE_PATH = '/jaladarangam/bt_profile'
+BT_AGENT_PATH = '/jaladarangam/bt_agent'
+BT_RFCOMM_CHANNEL = 1
+
+
+def _set_adapter_property(bus, name, value):
+    adapter = bus.get_object('org.bluez', BT_ADAPTER_PATH)
+    dbus.Interface(adapter, 'org.freedesktop.DBus.Properties').Set(
+        'org.bluez.Adapter1', name, value)
+
+
+def _handle_bt_client(sock, device_path):
+    """Runs in its own thread per connected Bluetooth client (spawned by
+    _BluetoothProfile.NewConnection below) - a plain blocking read loop,
+    completely separate from the GLib mainloop thread that handles D-Bus/
+    pairing/connection-setup, so a slow or stalled client can never block
+    new Bluetooth connections or D-Bus callbacks. Mirrors _ws_handler's
+    responsibilities (register, send initial state, dispatch incoming
+    commands, clean up on disconnect) for this transport."""
+    with _bt_clients_lock:
+        _bt_clients.add(sock)
+    print(f"[bluetooth] client connected ({device_path}), fd={sock.fileno()}; "
+          f"{len(_bt_clients)} total", flush=True)
+    try:
+        sock.sendall((json.dumps({'type': 'state', 'state': get_full_state()}) + '\n').encode())
+        buf = b''
+        while True:
+            chunk = sock.recv(4096)
+            if not chunk:
+                print(f"[bluetooth] recv() returned empty - remote closed "
+                      f"({device_path})", flush=True)
+                break
+            buf += chunk
+            while b'\n' in buf:
+                line, buf = buf.split(b'\n', 1)
+                line = line.decode(errors='ignore').strip()
+                if not line:
+                    continue
+                reply = _dispatch_command(line)
+                if reply is not None:
+                    sock.sendall((json.dumps(reply) + '\n').encode())
+    except OSError as e:
+        print(f"[bluetooth] socket error on ({device_path}): {e!r}", flush=True)
+    finally:
+        with _bt_clients_lock:
+            _bt_clients.discard(sock)
+        sock.close()
+        print(f"[bluetooth] client disconnected ({device_path}); "
+              f"{len(_bt_clients)} total", flush=True)
+
+
+if dbus is not None:
+    class _BluetoothProfile(dbus.service.Object):
+        """The registered SPP server profile object - bluetoothd (running
+        as root; see the D-Bus policy note in run_bluetooth_server) calls
+        these methods on us over D-Bus. Defined conditionally on dbus
+        being importable, since dbus.service.Object doesn't exist at all
+        otherwise (this whole class would fail to define, not just fail
+        to run, if dbus is None)."""
+        @dbus.service.method('org.bluez.Profile1', in_signature='', out_signature='')
+        def Release(self):
+            print('[bluetooth] profile released', flush=True)
+
+        @dbus.service.method('org.bluez.Profile1', in_signature='oha{sv}', out_signature='')
+        def NewConnection(self, device, fd, properties):
+            # fd is a dbus.types.UnixFd - .take() hands us the real
+            # underlying file descriptor (and ownership of it); wrapping
+            # it as a socket lets us use ordinary recv/sendall on what is
+            # actually an already-connected RFCOMM socket.
+            try:
+                sock = socket.socket(fileno=fd.take())
+                # The fd BlueZ hands us over D-Bus is non-blocking (that
+                # flag lives on the underlying kernel file description,
+                # inherited from how bluetoothd itself uses the socket -
+                # wrapping it in a new socket.socket() object here does
+                # NOT reset it). Without this, the very first sendall()
+                # in _handle_bt_client raises BlockingIOError(EAGAIN)
+                # immediately, silently tearing the connection down
+                # before a single byte is sent - this exact failure
+                # (connects, then disconnects within the same second,
+                # every time) was diagnosed live via verbose fd/errno
+                # logging during development; see this file's PR
+                # discussion for the full trace that caught it.
+                sock.setblocking(True)
+                threading.Thread(target=_handle_bt_client, args=(sock, str(device)),
+                                  daemon=True).start()
+            except Exception:
+                import traceback
+                traceback.print_exc()
+                raise
+
+        @dbus.service.method('org.bluez.Profile1', in_signature='o', out_signature='')
+        def RequestDisconnection(self, device):
+            print(f'[bluetooth] disconnection requested: {device}', flush=True)
+
+    class _BluetoothAgent(dbus.service.Object):
+        """A 'NoInputNoOutput' pairing agent - this capability is what
+        gets Bluetooth Secure Simple Pairing's 'Just Works' mode: neither
+        side is asked to confirm a PIN/passkey, appropriate for a device
+        with no display/keyboard for that (and fine for a local-network
+        demo instrument). AuthorizeService/RequestConfirmation both just
+        return immediately (== approve) rather than raising - BlueZ takes
+        a method returning normally as authorization granted."""
+        @dbus.service.method('org.bluez.Agent1', in_signature='', out_signature='')
+        def Release(self):
+            pass
+
+        @dbus.service.method('org.bluez.Agent1', in_signature='os', out_signature='')
+        def AuthorizeService(self, device, uuid):
+            return
+
+        @dbus.service.method('org.bluez.Agent1', in_signature='ou', out_signature='')
+        def RequestConfirmation(self, device, passkey):
+            return
+
+        @dbus.service.method('org.bluez.Agent1', in_signature='', out_signature='')
+        def Cancel(self):
+            pass
+
+
+def run_bluetooth_server():
+    """Runs the Bluetooth SPP transport's D-Bus/GLib mainloop in this
+    thread (started as a daemon thread from main - see there) - separate
+    from both control_loop's real-time polling AND run_network_server's
+    asyncio loop, so none of the three can block each other. Registers:
+    (1) a NoInputNoOutput pairing agent for 'Just Works' pairing, (2) an
+    SPP server profile at the standard Serial Port Profile UUID, so any
+    generic Bluetooth SPP terminal app can find and connect to it exactly
+    like it would any other serial-over-Bluetooth device.
+
+    Runs as the ordinary pyru1 user, not root - verified directly (not
+    assumed) that this works: this system's /usr/share/dbus-1/system.d/
+    bluetooth.conf grants send_destination=org.bluez to the D-Bus
+    "default" policy context (i.e. every user), and separately grants
+    send_interface=org.bluez.{Profile1,Agent1} to user=root - the latter
+    covers bluetoothd (which runs as root) calling INTO the objects we
+    register below, not us calling BlueZ, so it doesn't require this
+    process to run as root. Bench-tested with a throwaway profile/agent
+    registration script as pyru1 before writing this function for real.
+
+    Also required getting the adapter itself into a state where any of
+    this could work at all: it was rfkill soft-blocked (Bluetooth had
+    never been used on this Pi before), which silently made even
+    Adapter1.Set(Powered, True) fail. The systemd unit (see systemd/
+    jaladarangam.service) unblocks that on every start via an
+    ExecStartPre, since that state is not guaranteed to survive a
+    reboot and requires root to change (this process, running as
+    pyru1, cannot fix that itself)."""
+    if dbus is None:
+        print("[bluetooth] 'dbus'/'PyGObject' not available - Bluetooth "
+              "control disabled (stdin and WiFi control are unaffected).",
+              flush=True)
+        return
+
+    try:
+        dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+        bus = dbus.SystemBus()
+
+        _set_adapter_property(bus, 'Alias', dbus.String(BT_ADAPTER_ALIAS))
+        _set_adapter_property(bus, 'Powered', dbus.Boolean(True))
+        _set_adapter_property(bus, 'DiscoverableTimeout', dbus.UInt32(0))  # 0 = never times out
+        _set_adapter_property(bus, 'Discoverable', dbus.Boolean(True))
+        _set_adapter_property(bus, 'PairableTimeout', dbus.UInt32(0))
+        _set_adapter_property(bus, 'Pairable', dbus.Boolean(True))
+
+        agent = _BluetoothAgent(bus, BT_AGENT_PATH)
+        agent_manager = dbus.Interface(bus.get_object('org.bluez', '/org/bluez'),
+                                        'org.bluez.AgentManager1')
+        agent_manager.RegisterAgent(BT_AGENT_PATH, 'NoInputNoOutput')
+        agent_manager.RequestDefaultAgent(BT_AGENT_PATH)
+
+        profile = _BluetoothProfile(bus, BT_PROFILE_PATH)
+        profile_manager = dbus.Interface(bus.get_object('org.bluez', '/org/bluez'),
+                                          'org.bluez.ProfileManager1')
+        profile_manager.RegisterProfile(BT_PROFILE_PATH, BT_SPP_UUID, {
+            'Name': dbus.String('Jaladarangam Control'),
+            'Role': dbus.String('server'),
+            'Channel': dbus.UInt16(BT_RFCOMM_CHANNEL),
+            'RequireAuthentication': dbus.Boolean(False),
+            'RequireAuthorization': dbus.Boolean(False),
+        })
+    except Exception as e:
+        print(f"[bluetooth] setup failed ({e}) - Bluetooth control disabled "
+              "(stdin and WiFi control are unaffected).", flush=True)
+        return
+
+    print(f"[bluetooth] SPP service '{BT_ADAPTER_ALIAS}' registered on RFCOMM "
+          f"channel {BT_RFCOMM_CHANNEL} (UUID {BT_SPP_UUID}); discoverable and "
+          "pairable now, no PIN required (Just Works).", flush=True)
+
+    GLib.MainLoop().run()
 
 
 def poll_gamakam(raw, prev_pressed):
@@ -1614,6 +1893,8 @@ def main():
     listener_thread.start()
     network_thread = threading.Thread(target=run_network_server, daemon=True)
     network_thread.start()
+    bluetooth_thread = threading.Thread(target=run_bluetooth_server, daemon=True)
+    bluetooth_thread.start()
 
     try:
         with sd.OutputStream(samplerate=SAMPLE_RATE, blocksize=BLOCKSIZE, channels=1,

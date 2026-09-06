@@ -1,0 +1,13 @@
+[Unit]
+Description=Jaladarangam hardware-driven instrument (WiFi + Bluetooth control)
+After=bluetooth.target sound.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/mindfulness-instrument
+ExecStart=/usr/bin/python3 %h/mindfulness-instrument/jaladarangam.py --raga Shankarabharanam
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

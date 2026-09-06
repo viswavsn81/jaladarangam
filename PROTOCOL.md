@@ -1,13 +1,11 @@
 # jaladarangam.py network control protocol
 
 This is the contract for any client (Android app, browser dev console, test
-script) controlling `jaladarangam.py` remotely. It is transport-specific to
-WebSocket today; a future Bluetooth (SPP or BLE GATT) transport is planned to
-carry the exact same JSON messages over different bytes-in/bytes-out plumbing
-(see `run_network_server`'s docstring in `jaladarangam.py`) - nothing in this
-document should need to change for that.
+script, Bluetooth SPP terminal app) controlling `jaladarangam.py` remotely.
+The **same JSON command set and state-push shape** applies over both
+transports below - only how the bytes get to/from the process differs.
 
-## Transport (today: WebSocket)
+## Transport 1: WiFi (WebSocket)
 
 - URL: `ws://<pi-ip>:8765`
 - The Pi's LAN IP is **not fixed** in this document on purpose - run
@@ -19,7 +17,37 @@ document should need to change for that.
 - Every message, both directions, is a single JSON object per WebSocket
   text frame (not newline-delimited, not batched).
 
-## Client -> server: commands
+## Transport 2: Bluetooth (Classic SPP / RFCOMM)
+
+- Device name shown while scanning/pairing: **`Jaladarangam`** (this Pi's
+  Bluetooth alias - not its hostname).
+- Service: standard Serial Port Profile, UUID `00001101-0000-1000-8000-00805f9b34fb`,
+  RFCOMM channel 1. Any generic Bluetooth SPP terminal app (Android or
+  otherwise) that connects "by UUID" (the normal way - `BluetoothDevice.
+  createRfcommSocketToServiceRecord(SPP_UUID)` on Android) finds this
+  automatically; you should not need to hardcode channel 1, though it's
+  fixed if a client needs it.
+- **Pairing is "Just Works" - no PIN or passkey needed on either side.**
+  The Pi registers a `NoInputNoOutput` pairing agent, which is what
+  triggers Secure Simple Pairing's Just Works mode. From a phone: scan for
+  Bluetooth devices, tap "Jaladarangam", confirm the pairing prompt (there
+  is nothing to type or compare) - that's the whole flow.
+- The Pi is **always discoverable and pairable** while `jaladarangam.py` is
+  running (no discoverability timeout is set) - this is a local demo
+  device, not a device meant to hide from casual scanning.
+- **Framing is newline-delimited JSON**, one JSON object per line (`\n`-
+  terminated) - unlike a WebSocket, a raw RFCOMM socket has no built-in
+  per-message framing, so this project uses the same line-per-message
+  convention already used for the Arduino Nano's serial link. Any SPP
+  terminal app that sends/displays plain text with normal line endings
+  works fine; do not send multiple JSON objects on one line, and do not
+  split one JSON object across multiple lines.
+- No authentication beyond standard Bluetooth pairing/bonding. Once
+  paired, a bonded device can reconnect without re-pairing (normal
+  Bluetooth behavior) - unpair from your phone's Bluetooth settings to
+  revoke that.
+
+## Client -> server: commands (both transports)
 
 Every command is `{"cmd": "<name>", ...fields}`. Unknown `cmd` values or
 malformed JSON get back a `type: "error"` reply (see below) - they never
@@ -50,9 +78,10 @@ feature behind such a command to expose. Do not build UI for it.
 ## Server -> client: state pushes
 
 After **every command that actually changes something** - whether it
-arrived over this WebSocket connection, a different WebSocket connection,
-or the Pi's local stdin console - the server pushes the full current state
-to **every connected client**:
+arrived over WiFi, Bluetooth, or the Pi's local stdin console - the server
+pushes the full current state to **every connected client on both
+transports**. A change made from a Bluetooth-connected phone is seen
+immediately by a WebSocket-connected client too, and vice versa:
 
 ```json
 {
@@ -69,6 +98,9 @@ to **every connected client**:
   }
 }
 ```
+
+(Over Bluetooth SPP, this same JSON is followed by a `\n` - see the framing
+note above. Over WebSocket, it's the entire content of one text frame.)
 
 Field meanings:
 
@@ -104,15 +136,64 @@ Common causes: malformed JSON, missing `cmd` field, unknown `cmd`, an
 invalid `band`/`instrument` value, a non-numeric or fractional `delta`/
 `value`, or an EQ change that would clip the output.
 
-## Design notes for the Bluetooth transport (future work, not yet built)
+## Running persistently (systemd)
 
-- `NETWORK_COMMANDS` in `jaladarangam.py` is the single dispatch table
-  every transport should use - it maps each `cmd` string above to the
-  underlying function (`toggle_drone`, `adjust_band`, etc.), fully
-  independent of how the JSON arrived.
-- A Bluetooth transport's job is only: accept a connection (SPP) or GATT
-  write (BLE), decode the incoming bytes into the same `{"cmd": ...}` JSON
-  shape used here, dispatch through `NETWORK_COMMANDS` the same way
-  `_handle_ws_message` does, and call `get_full_state()`/`broadcast_state()`
-  the same way for whatever client(s) it's serving.
-- No protocol redesign should be needed - only new bytes-in/bytes-out code.
+`jaladarangam.py` (both transports, plus stdin) runs as a `systemd --user`
+service on the Pi (`~/.config/systemd/user/jaladarangam.service`, also
+checked into this repo at `systemd/jaladarangam.service`), with lingering
+enabled (`loginctl enable-linger pyru1`) so it starts at boot without
+needing an interactive login and restarts automatically on failure. Common
+commands (run on the Pi, as the `pyru1` user - no `sudo` needed for these):
+
+```
+systemctl --user status jaladarangam.service    # is it running?
+systemctl --user restart jaladarangam.service   # e.g. after editing the .py
+journalctl --user-unit=jaladarangam.service -f  # live logs (PLUCK/JARU/etc.)
+```
+
+### Bluetooth troubleshooting: rfkill
+
+The very first time Bluetooth was used on this Pi, the adapter was
+rfkill **soft-blocked** (`Powered` couldn't even be set to true until
+unblocked - `cat /sys/class/rfkill/rfkill*/soft`, `1` means blocked).
+`systemd-rfkill` persists the unblocked state across reboots automatically
+once fixed, so this shouldn't recur - but if Bluetooth ever silently stops
+working again and `bluetoothctl show` reports `Powered: no`, check rfkill
+state first before assuming a code problem:
+
+```
+cat /sys/class/rfkill/rfkill*/soft   # 0 = unblocked, 1 = blocked
+echo 0 | sudo tee /sys/class/rfkill/rfkillN/soft   # unblock the bluetooth one
+```
+
+## Implementation notes (why these libraries)
+
+- **WiFi**: `websockets` (installed via `sudo apt install python3-websockets`
+  - not pip, since this system's Python is externally-managed per PEP 668).
+- **Bluetooth**: `dbus-python` + PyGObject's `GLib` (both already present on
+  Raspberry Pi OS), talking directly to BlueZ's own D-Bus API
+  (`org.bluez.ProfileManager1`, `org.bluez.AgentManager1`) - **not**
+  PyBluez. PyBluez is packaged for Debian (`python3-bluez`) but that
+  package is literally PyBluez's last-ever upstream release (0.23,
+  ~2018) with no real maintenance since. The older `sdptool`/`hciconfig`
+  approach some PyBluez-era tutorials use doesn't work on this system's
+  BlueZ at all (`bluetoothd` runs without the legacy `--compat` flag it
+  requires). The RFCOMM socket I/O itself uses only Python's built-in
+  `socket` module (`AF_BLUETOOTH`/`BTPROTO_RFCOMM`), which needs no
+  extra package at all.
+- `NETWORK_COMMANDS` and `_dispatch_command` in `jaladarangam.py` are the
+  single dispatch layer both transports use - a command's *behavior* is
+  defined exactly once, regardless of which transport (or stdin) it
+  arrived through.
+- **A real gotcha worth knowing if this ever needs touching again**: the
+  file descriptor BlueZ hands over via `Profile1.NewConnection`'s D-Bus
+  call is in **non-blocking mode** - that flag lives on the underlying
+  kernel file description (inherited from how `bluetoothd` itself uses
+  the socket), not something `socket.socket(fileno=...)` resets just by
+  wrapping it. Without an explicit `sock.setblocking(True)` right after
+  wrapping it, the first `sendall()` raises `BlockingIOError(EAGAIN)`
+  immediately - which looked, from a phone's SPP terminal app, exactly
+  like "pairs fine, connects, then silently disconnects within the same
+  second, every single time," with `bluetoothd`'s own logs showing
+  nothing wrong. Confirmed live via verbose fd/errno logging during
+  development before landing on this fix.
