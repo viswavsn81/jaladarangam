@@ -1,0 +1,33 @@
+Item,Refs,Qty,Value,Footprint,DNP,Notes
+Board part,J1,1,RPi_GPIO_2x20,Connector_PinHeader_2.54mm:PinHeader_2x20_P2.54mm_Vertical,,Raspberry Pi 3 40-pin GPIO header
+Board part,U1,1,MCP3008,Package_DIP:DIP-16_W7.62mm_Socket,,8-channel 10-bit SPI ADC (socketed)
+Board part,"R1,R2,R3,R4,R5,R6,R7,R8,R9,R10,R11,R12,R13,R14,R15,R16",16,10k,Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P10.16mm_Horizontal,,"FSR divider pulldown, channel 0"
+Board part,J2,1,FSR0,Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical,,Off-board FSR note key 0
+Board part,J3,1,FSR1,Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical,,Off-board FSR note key 1
+Board part,J4,1,FSR2,Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical,,Off-board FSR note key 2
+Board part,J5,1,FSR3,Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical,,Off-board FSR note key 3
+Board part,J6,1,FSR4,Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical,,Off-board FSR note key 4
+Board part,J7,1,FSR5,Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical,,Off-board FSR note key 5
+Board part,J8,1,FSR6,Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical,,Off-board FSR note key 6
+Board part,J9,1,FSR7,Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical,,Off-board FSR note key 7
+Board part,U2,1,74HC595,Package_DIP:DIP-16_W7.62mm_Socket,,8-bit serial-in parallel-out shift register (socketed)
+Board part,U3,1,ULN2803A,Package_DIP:DIP-18_W7.62mm_Socket,,8-channel Darlington driver array (socketed)
+Board part,J10,1,MOTOR0,Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical,,Off-board vibration motor 0
+Board part,J11,1,MOTOR1,Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical,,Off-board vibration motor 1
+Board part,J12,1,MOTOR2,Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical,,Off-board vibration motor 2
+Board part,J13,1,MOTOR3,Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical,,Off-board vibration motor 3
+Board part,J14,1,MOTOR4,Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical,,Off-board vibration motor 4
+Board part,J15,1,MOTOR5,Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical,,Off-board vibration motor 5
+Board part,J16,1,MOTOR6,Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical,,Off-board vibration motor 6
+Board part,J17,1,MOTOR7,Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical,,Off-board vibration motor 7
+Board part,J18,1,MOTOR_PWR,TerminalBlock:TerminalBlock_MaiXu_MX126-5.0-02P_1x02_P5.00mm,,Separate motor supply input (V+ / GND)
+Board part,U4,1,74HC165,Package_DIP:DIP-16_W7.62mm_Socket,DNP,"8-bit parallel-in shift register (socketed, DNP)"
+Board part,J19,1,AUX_IN,Connector_PinHeader_2.54mm:PinHeader_1x10_P2.54mm_Vertical,,"Auxiliary digital input header (GND, D0..D7, GND)"
+Board part,"C1,C3,C4,C6,C5",5,100nF,Capacitor_THT:C_Disc_D5.0mm_W2.5mm_P5.00mm,,U1 VDD decoupling
+Board part,"C2,C7",2,10uF,Capacitor_THT:CP_Radial_D5.0mm_P2.50mm,,MCP3008 VREF/VDD bulk
+Board part,C8,1,220uF,Capacitor_THT:CP_Radial_D8.0mm_P3.50mm,,Motor supply bulk reservoir
+Socket,"for U1,U2,U4",3,"DIP-16 socket, 7.62mm",Package_DIP:DIP-16_W7.62mm_Socket,,16-pin 0.3in DIP IC socket - fit the socket even where the IC is DNP.
+Socket,for U3,1,"DIP-18 socket, 7.62mm",Package_DIP:DIP-18_W7.62mm_Socket,,18-pin 0.3in DIP IC socket - fit the socket even where the IC is DNP.
+Off-board,FSR0-FSR7,8,Force-sensing resistor,,,"Note key sensor, wired to J2-J9. Forms the upper leg of each divider against the on-board 10k pulldown."
+Off-board,M0-M7,8,Vibration motor,,,"Wired to J10-J17. Positive lead to the header's MOTOR_V+ pin, negative to the ULN2803A output pin."
+Off-board,PSU,1,Motor supply,,,"Separate supply into J18, sized for 8 motors. Shares only GND with the 3.3V logic domain."

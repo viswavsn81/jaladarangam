@@ -1,0 +1,18 @@
+# KiCad config + library tables seeded by scripts/kienv.sh.
+# Machine-local and regenerated on demand; not part of the design.
+.kicad-config/
+
+# KiCad per-user project state (window layout, last-used settings).
+*.kicad_prl
+fp-info-cache
+
+# KiCad autosave and backups.
+*-backups/
+*.kicad_sch-bak
+*.kicad_pcb-bak
+_autosave-*
+
+# Intermediate renders. docs/*.pdf are the reviewable outputs and are tracked;
+# the PNG/SVG exports are throwaway and regenerate from them.
+docs/*.png
+docs/*.svg

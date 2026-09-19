@@ -1,0 +1,4 @@
+(sym_lib_table
+	(version 7)
+	(lib (name "jaladarangam") (type "KiCad") (uri "${KIPRJMOD}/jaladarangam.kicad_sym") (options "") (descr "Project-local symbols: MOTOR_V+ power rail"))
+)
