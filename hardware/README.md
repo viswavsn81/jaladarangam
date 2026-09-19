@@ -24,6 +24,7 @@ re-run the pipeline.
 scripts/build.sh     board_spec -> .kicad_pro -> .kicad_sch -> .kicad_pcb -> .dsn
 scripts/route.sh     autoroute, import the session, DRC, zone check
 scripts/fab.sh       gerbers, drill files, BOM, review PDFs
+scripts/make_review.sh   3D renders, 2D layout, silkscreen close-ups -> review/
 ```
 
 The order in `build.sh` matters. `make_project_file.py` writes the net classes
@@ -46,6 +47,37 @@ Each stage is checked independently rather than trusted:
 | `import_ses.py` | Track widths that actually landed on copper match their net class |
 | `kicad-cli pcb drc` | 0 violations, 0 unconnected |
 | `verify_zones.py` | Motor and analog copper stayed in their own zones after routing |
+
+## Review images
+
+`review/` holds tracked PNGs so the board can be looked at without opening
+KiCad, and regenerates with `scripts/make_review.sh`:
+
+| File | What it shows |
+|---|---|
+| `pcb_3d_iso.png` | 3D isometric with component bodies |
+| `pcb_3d_top.png` / `pcb_3d_bottom.png` | 3D straight-on, both sides |
+| `pcb_2d_layout.png` | 2D layout: both copper layers, silkscreen, outline |
+| `pcb_silkscreen.png` | Silkscreen + board outline only, no copper |
+| `silk_fsr_headers.png` | Close-up: FSR note-key headers J2-J9 |
+| `silk_motor_headers.png` | Close-up: motor headers J10-J17 |
+| `silk_motor_power.png` | Close-up: motor supply input J18 |
+| `silk_aux_header.png` | Close-up: AUX digital input header J19 |
+| `silk_pi_header.png` | Close-up: Raspberry Pi GPIO header J1 |
+
+The silkscreen views plot `F.Silkscreen` and `Edge.Cuts` only, in black and
+white - no copper behind the captions, and far better contrast than KiCad's
+silkscreen yellow on a white page. `Edge.Cuts` is kept purely for orientation.
+
+Crops come from the footprints themselves (`dump_regions.py` reads the board),
+not hard-coded rectangles, so they stay correct if placement changes. KiCad's
+`--page-size-mode 2` SVG carries a viewBox in board millimetres, so a crop is
+just a narrowed viewBox rather than pixel arithmetic.
+
+3D renders need the 3D model packages, which the lite AppImage omits;
+`kienv.sh` points `KICAD10_3DMODEL_DIR` at a full KiCad extract when one is
+present and warns if it is not. U4 renders as bare pads because KiCad hides
+3D models for DNP parts - its socket is still fitted.
 
 ## Toolchain
 

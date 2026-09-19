@@ -12,7 +12,14 @@ HW_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 export KICAD10_SYMBOL_DIR="$KICAD_ROOT/share/kicad/symbols"
 export KICAD10_FOOTPRINT_DIR="$KICAD_ROOT/share/kicad/footprints"
-export KICAD10_3DMODEL_DIR="$KICAD_ROOT/share/kicad/3dmodels"
+# The lite AppImage ships no 3D models; the full extract provides them and is
+# used for 3D renders when present.
+KICAD_FULL_ROOT="${KICAD_FULL_ROOT:-/home/pyru/opt/kicad10-full/squashfs-root}"
+if [ -d "$KICAD_FULL_ROOT/share/kicad/3dmodels" ]; then
+    export KICAD10_3DMODEL_DIR="$KICAD_FULL_ROOT/share/kicad/3dmodels"
+else
+    export KICAD10_3DMODEL_DIR="$KICAD_ROOT/share/kicad/3dmodels"
+fi
 export KICAD10_TEMPLATE_DIR="$KICAD_ROOT/share/kicad/template"
 # KiCad resolves its settings dir as $XDG_CONFIG_HOME/kicad/<version>/.
 export XDG_CONFIG_HOME="$HW_DIR/.kicad-config"
