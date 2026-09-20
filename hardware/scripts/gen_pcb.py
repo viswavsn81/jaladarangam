@@ -91,17 +91,25 @@ def pad_bbox_mm(fp):
             pcbnew.ToMM(max(xs)), pcbnew.ToMM(max(ys)))
 
 
-def caption_position(fp, caption, side):
+def caption_position(fp, caption, side, gap=CAPTION_GAP):
     """Where a connector caption goes, relative to the connector's copper."""
     left, top, right, bottom = pad_bbox_mm(fp)
     width = len(caption) * CAPTION_SIZE * 0.85
     if side == "below":
-        return (left, bottom + CAPTION_GAP)
+        return (left, bottom + gap)
     if side == "above":
-        return (left, top - CAPTION_GAP)
+        return (left, top - gap)
     if side == "left":
-        return (left - CAPTION_GAP - width, (top + bottom) / 2.0)
-    return (right + CAPTION_GAP, (top + bottom) / 2.0)
+        return (left - gap - width, (top + bottom) / 2.0)
+    return (right + gap, (top + bottom) / 2.0)
+
+
+def pad_position_mm(fp, number):
+    for pad in fp.Pads():
+        if pad.GetNumber() == number:
+            pos = pad.GetPosition()
+            return (pcbnew.ToMM(pos.x), pcbnew.ToMM(pos.y))
+    raise SystemExit("%s has no pad %s" % (fp.GetReference(), number))
 
 
 def load_footprint(fp_root, footprint_id):
@@ -113,7 +121,7 @@ def load_footprint(fp_root, footprint_id):
     return fp
 
 
-def add_text(board, x, y, text, size, rotation=0.0, layer=None):
+def add_text(board, x, y, text, size, rotation=0.0, layer=None, centre=False):
     item = pcbnew.PCB_TEXT(board)
     item.SetText(text)
     item.SetPosition(mm(x, y))
@@ -121,7 +129,8 @@ def add_text(board, x, y, text, size, rotation=0.0, layer=None):
     item.SetTextSize(pcbnew.VECTOR2I(pcbnew.FromMM(size), pcbnew.FromMM(size)))
     item.SetTextThickness(pcbnew.FromMM(SILK_WIDTH))
     item.SetTextAngleDegrees(rotation)
-    item.SetHorizJustify(pcbnew.GR_TEXT_H_ALIGN_LEFT)
+    item.SetHorizJustify(pcbnew.GR_TEXT_H_ALIGN_CENTER if centre
+                         else pcbnew.GR_TEXT_H_ALIGN_LEFT)
     board.Add(item)
     return item
 
@@ -194,9 +203,15 @@ def build(fp_root, out_path, project_path):
     for x, y, text, size, rot in spec.SILK_ZONE_LABELS:
         add_text(board, x, y, text, size, rot)
 
-    for ref, caption, side in spec.silk_connector_labels():
-        x, y = caption_position(placed[ref], caption, side)
+    for ref, caption, side, gap in spec.silk_connector_labels():
+        x, y = caption_position(placed[ref], caption, side, gap)
         add_text(board, x, y, caption, CAPTION_SIZE)
+
+    # Polarity marks, each centred over the pad it labels.
+    for ref, number, caption in spec.PAD_POLARITY_LABELS:
+        px, py = pad_position_mm(placed[ref], number)
+        add_text(board, px, py - spec.POLARITY_OFFSET, caption,
+                 spec.POLARITY_TEXT_SIZE, centre=True)
 
     check_netclasses(board)
 

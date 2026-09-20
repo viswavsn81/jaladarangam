@@ -310,23 +310,27 @@ def sanity_check(components, nets):
         if ends != {NET_GND}:
             problems.append("J19 end pins 1 and 10 must both be GND, got %s" % ends)
 
+    # Polarity marks must agree with the net actually on that pad.
+    by_ref = {c.ref: c for c in components}
+    for ref, pin, caption in PAD_POLARITY_LABELS:
+        comp = by_ref.get(ref)
+        if comp is None:
+            problems.append("polarity mark refers to missing component %s" % ref)
+            continue
+        actual = comp.pins.get(pin)
+        expected = POLARITY_MEANS_NET.get(caption)
+        if expected is None:
+            problems.append("polarity caption %r has no declared meaning" % caption)
+        elif actual != expected:
+            problems.append("%s pad %s is marked %r but carries %s, not %s"
+                            % (ref, pin, caption, actual, expected))
+
     # Each AUX input: 165 pin + pulldown + header, exactly 3 pads.
     for i in range(8):
         if len(nets.get("AUX%d" % i, [])) != 3:
             problems.append("AUX%d should have 3 pads" % i)
 
     return problems
-
-
-if __name__ == "__main__":
-    comps = build_components()
-    nets = build_nets(comps)
-    print("%d components, %d nets" % (len(comps), len(nets)))
-    for net in sorted(nets):
-        print("  %-10s %2d  %s" % (net, len(nets[net]),
-                                   " ".join("%s.%s" % p for p in nets[net])))
-    issues = sanity_check(comps, nets)
-    print("\nsanity check: %s" % ("OK" if not issues else "\n  ".join([""] + issues)))
 
 
 # --------------------------------------------------------------------------
@@ -449,15 +453,49 @@ SILK_ZONE_LABELS = [
 
 
 def silk_connector_labels():
-    """(ref, caption, side) for every off-board connector.
+    """(ref, caption, side, gap_mm) for every off-board connector.
 
     ``side`` says where the caption goes relative to the connector's copper:
     the motor headers get theirs on the inboard side so a caption never lands
-    on the next header down the edge.
+    on the next header down the edge.  ``gap_mm`` is the clearance from that
+    copper; J18 needs a wider one to clear its terminal-block body outline and
+    leave room for the polarity marks beneath it.
     """
-    out = [("J1", "RPi GPIO", "below"),
-           ("J18", "MOTOR PWR", "above"),
-           ("J19", "GND AUX D0-D7 GND", "above")]
-    out += [("J%d" % (i + 2), "FSR%d" % i, "below") for i in range(8)]
-    out += [("J%d" % (i + 10), "M%d" % i, "left") for i in range(8)]
+    out = [("J1", "RPi GPIO", "below", 1.8),
+           ("J18", "MOTOR PWR", "above", 8.0),
+           ("J19", "GND AUX D0-D7 GND", "above", 1.8)]
+    out += [("J%d" % (i + 2), "FSR%d" % i, "below", 1.8) for i in range(8)]
+    out += [("J%d" % (i + 10), "M%d" % i, "left", 1.8) for i in range(8)]
     return out
+
+
+# --------------------------------------------------------------------------
+# Pad polarity marks: (ref, pad number, caption).
+#
+# The motor supply input carries a separate, potentially higher-voltage rail.
+# Connecting it backwards would drive MOTOR_V+ straight onto the board's
+# ground net, so both pins are called out on silkscreen rather than relying on
+# the pad-1 square marker alone.  Marks sit above the connector body, clear of
+# its own outline, each centred over the pad it belongs to.
+# --------------------------------------------------------------------------
+PAD_POLARITY_LABELS = [
+    ("J18", "1", "+"),      # MOTOR_V+
+    ("J18", "2", "GND"),
+]
+POLARITY_TEXT_SIZE = 1.2
+POLARITY_OFFSET = 7.0       # mm above the pad centre
+
+# What each polarity caption asserts about the pad it labels.  Checked in
+# sanity_check: a stale mark on a power connector is worse than no mark.
+POLARITY_MEANS_NET = {"+": NET_MOTOR, "GND": NET_GND}
+
+
+if __name__ == "__main__":
+    comps = build_components()
+    nets = build_nets(comps)
+    print("%d components, %d nets" % (len(comps), len(nets)))
+    for net in sorted(nets):
+        print("  %-10s %2d  %s" % (net, len(nets[net]),
+                                   " ".join("%s.%s" % p for p in nets[net])))
+    issues = sanity_check(comps, nets)
+    print("\nsanity check: %s" % ("OK" if not issues else "\n  ".join([""] + issues)))
