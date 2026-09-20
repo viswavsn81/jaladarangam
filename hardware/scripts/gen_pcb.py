@@ -207,10 +207,20 @@ def build(fp_root, out_path, project_path):
         x, y = caption_position(placed[ref], caption, side, gap)
         add_text(board, x, y, caption, CAPTION_SIZE)
 
-    # Polarity marks, each centred over the pad it labels.
-    for ref, number, caption in spec.PAD_POLARITY_LABELS:
+    # Polarity marks, each centred on the pad it labels.  "above" suits pins
+    # side by side; "right" puts the mark in the board margin outboard of a
+    # vertically stacked pin pair, where there is room between them.
+    for ref, number, caption, side, _net in spec.PAD_POLARITY_LABELS:
         px, py = pad_position_mm(placed[ref], number)
-        add_text(board, px, py - spec.POLARITY_OFFSET, caption,
+        if side == "above":
+            pos = (px, py - spec.POLARITY_OFFSET_ABOVE)
+        elif side == "right":
+            pos = (px + spec.POLARITY_OFFSET_SIDE, py)
+        elif side == "left":
+            pos = (px - spec.POLARITY_OFFSET_SIDE, py)
+        else:
+            pos = (px, py + spec.POLARITY_OFFSET_ABOVE)
+        add_text(board, pos[0], pos[1], caption,
                  spec.POLARITY_TEXT_SIZE, centre=True)
 
     check_netclasses(board)

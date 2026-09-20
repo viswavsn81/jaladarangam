@@ -40,7 +40,8 @@ Each stage is checked independently rather than trusted:
 
 | Check | What it proves |
 |---|---|
-| `board_spec.sanity_check` | No duplicate refs, no single-pad nets, MOTOR_V+ and +3V3 share no pad, divider/driver/aux nets have the right pad counts |
+| `board_spec.sanity_check` | No duplicate refs, no single-pad nets, MOTOR_V+ and +3V3 share no pad, divider/driver/aux nets have the right pad counts, every polarity mark agrees with the net on its pad |
+| `verify_polarity.py` | Every silkscreen polarity mark sits nearest the pad it names, and that pad carries the net the mark asserts |
 | `kicad-cli sch erc` | KiCad's own electrical rules — 0 violations |
 | `verify_netlist.py` | KiCad's exported netlist matches `board_spec` pad-for-pad, and every deliberately open pin is accounted for |
 | `verify_netclasses.py` | The DSN handed to the router really carries 0.8 mm on the motor rail and 0.4 mm on signals |
@@ -127,6 +128,10 @@ Every off-board connector is edge-accessible and captioned on silkscreen:
 - J19 is a 1×10: pins 1 and 10 are GND, pins 2-9 are D0-D7.
 - Each FSR header is `+3V3` on pin 1, channel node on pin 2. The 10 k pulldown
   is on-board; the FSR forms the upper leg of the divider.
-- Each motor header is `MOTOR_V+` on pin 1, the ULN2803A output on pin 2.
+- Each motor header is `MOTOR_V+` on pin 1 (marked `+`), the ULN2803A output
+  on pin 2 (marked `-`). Pin 1 is the rectangular pad, with the L-shaped silk
+  corner beside it. Wire the motor's positive lead to `+`.
+- J18 is marked `+` (MOTOR_V+) and `GND`. Getting it backwards would put the
+  motor rail onto the board's ground net.
 - `fab/bom.csv` includes the sockets and the off-board parts;
   `fab/bom_kicad.csv` is KiCad's own export of the schematic parts only.

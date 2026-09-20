@@ -25,29 +25,32 @@ kpy() { "$KICAD_ROOT/AppRun" python3.11 "$@"; }
 
 cd "$HERE"
 
-step "1/8  board_spec self-check"
+step "1/9  board_spec self-check"
 python3 board_spec.py | tail -2
 
-step "2/8  project symbol library"
+step "2/9  project symbol library"
 python3 make_project_lib.py --symbols "$KICAD10_SYMBOL_DIR" --out "$SYM"
 
-step "3/8  project file (design rules + net classes)"
+step "3/9  project file (design rules + net classes)"
 python3 make_project_file.py --template "$KICAD_ROOT/share/kicad/template/kicad.kicad_pro" --out "$PRO"
 
-step "4/8  schematic"
+step "4/9  schematic"
 python3 gen_schematic.py --symbols "$KICAD10_SYMBOL_DIR" --project-lib "$SYM" --out "$SCH"
 
-step "5/8  PCB (inherits net classes from the project)"
+step "5/9  PCB (inherits net classes from the project)"
 kpy gen_pcb.py --footprints "$KICAD10_FOOTPRINT_DIR" --project "$PRO" --out "$PCB"
 
-step "6/8  ERC"
+step "6/9  polarity marks vs. placed pads"
+kpy "$HERE/verify_polarity.py" "$PCB"
+
+step "7/9  ERC"
 cli sch erc --output "$PROJ/erc.rpt" --severity-all "$SCH" | tail -2
 
-step "7/8  netlist cross-check against board_spec"
+step "8/9  netlist cross-check against board_spec"
 cli sch export netlist --format kicadsexpr --output "$HW/routing/netlist.net" "$SCH" >/dev/null
 python3 verify_netlist.py "$HW/routing/netlist.net"
 
-step "8/8  Specctra DSN export + net class verification"
+step "9/9  Specctra DSN export + net class verification"
 kpy export_dsn.py "$PCB" "$HW/routing/board.dsn"
 python3 verify_netclasses.py "$HW/routing/board.dsn"
 

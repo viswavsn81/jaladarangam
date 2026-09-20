@@ -312,18 +312,15 @@ def sanity_check(components, nets):
 
     # Polarity marks must agree with the net actually on that pad.
     by_ref = {c.ref: c for c in components}
-    for ref, pin, caption in PAD_POLARITY_LABELS:
+    for ref, pin, caption, _side, asserts in PAD_POLARITY_LABELS:
         comp = by_ref.get(ref)
         if comp is None:
             problems.append("polarity mark refers to missing component %s" % ref)
             continue
         actual = comp.pins.get(pin)
-        expected = POLARITY_MEANS_NET.get(caption)
-        if expected is None:
-            problems.append("polarity caption %r has no declared meaning" % caption)
-        elif actual != expected:
-            problems.append("%s pad %s is marked %r but carries %s, not %s"
-                            % (ref, pin, caption, actual, expected))
+        if actual != asserts:
+            problems.append("%s pad %s is marked %r claiming %s, but carries %s"
+                            % (ref, pin, caption, asserts, actual))
 
     # Each AUX input: 165 pin + pulldown + header, exactly 3 pads.
     for i in range(8):
@@ -470,24 +467,34 @@ def silk_connector_labels():
 
 
 # --------------------------------------------------------------------------
-# Pad polarity marks: (ref, pad number, caption).
+# Pad polarity marks: (ref, pad number, caption, side, net_it_asserts).
 #
-# The motor supply input carries a separate, potentially higher-voltage rail.
-# Connecting it backwards would drive MOTOR_V+ straight onto the board's
-# ground net, so both pins are called out on silkscreen rather than relying on
-# the pad-1 square marker alone.  Marks sit above the connector body, clear of
-# its own outline, each centred over the pad it belongs to.
+# Both the motor supply input and the eight motor outputs carry the separate
+# MOTOR_V+ rail on one pin.  Getting either backwards drives that rail onto
+# something it must never touch - the board's ground net at J18, or the
+# ULN2803A's open-collector output at J10-J17 - so both pins of each are
+# called out on silkscreen instead of relying on the pad-1 square alone.
+#
+# Each entry states the net it claims is on that pad.  sanity_check enforces
+# it, so a mark can never drift out of step with the wiring it describes.
+#
+# J18's pins sit side by side, so its marks go above each pad.  The motor
+# headers stack their pins 2.54 mm apart vertically, too close to caption from
+# above, so those marks go in the clear board margin outboard of each pad.
 # --------------------------------------------------------------------------
 PAD_POLARITY_LABELS = [
-    ("J18", "1", "+"),      # MOTOR_V+
-    ("J18", "2", "GND"),
+    ("J18", "1", "+", "above", NET_MOTOR),
+    ("J18", "2", "GND", "above", NET_GND),
 ]
-POLARITY_TEXT_SIZE = 1.2
-POLARITY_OFFSET = 7.0       # mm above the pad centre
+# Motor headers: pin 1 is the motor's positive lead on MOTOR_V+, pin 2 its
+# negative lead, sunk by the matching ULN2803A output.
+for _i in range(8):
+    PAD_POLARITY_LABELS.append(("J%d" % (_i + 10), "1", "+", "right", NET_MOTOR))
+    PAD_POLARITY_LABELS.append(("J%d" % (_i + 10), "2", "-", "right", "MOTOR%d" % _i))
 
-# What each polarity caption asserts about the pad it labels.  Checked in
-# sanity_check: a stale mark on a power connector is worse than no mark.
-POLARITY_MEANS_NET = {"+": NET_MOTOR, "GND": NET_GND}
+POLARITY_TEXT_SIZE = 1.2
+POLARITY_OFFSET_ABOVE = 7.0     # mm above the pad centre
+POLARITY_OFFSET_SIDE = 4.3      # mm outboard of the pad centre
 
 
 if __name__ == "__main__":
