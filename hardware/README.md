@@ -23,7 +23,7 @@ re-run the pipeline.
 ```
 scripts/build.sh     board_spec -> .kicad_pro -> .kicad_sch -> .kicad_pcb -> .dsn
 scripts/route.sh     autoroute, import the session, DRC, zone check
-scripts/fab.sh       gerbers, drill files, BOM, review PDFs
+scripts/fab.sh       gerbers, drill files, BOM
 scripts/make_review.sh   3D renders, 2D layout, silkscreen close-ups -> review/
 ```
 
@@ -50,11 +50,15 @@ Each stage is checked independently rather than trusted:
 
 ## Review images
 
-`review/` holds tracked PNGs so the board can be looked at without opening
-KiCad, and regenerates with `scripts/make_review.sh`:
+`review/` is the single home for reviewable output - schematic and board, PDF
+and PNG - so the design can be looked at without opening KiCad. It regenerates
+with `scripts/make_review.sh`:
 
 | File | What it shows |
 |---|---|
+| `schematic.pdf` | Full schematic, vector - the one to read properly |
+| `schematic.png` | Same sheet at 300 dpi, for a quick look |
+| `pcb_routed.pdf` | Routed board, vector |
 | `pcb_3d_iso.png` | 3D isometric with component bodies |
 | `pcb_3d_top.png` / `pcb_3d_bottom.png` | 3D straight-on, both sides |
 | `pcb_2d_layout.png` | 2D layout: both copper layers, silkscreen, outline |
@@ -73,6 +77,11 @@ Crops come from the footprints themselves (`dump_regions.py` reads the board),
 not hard-coded rectangles, so they stay correct if placement changes. KiCad's
 `--page-size-mode 2` SVG carries a viewBox in board millimetres, so a crop is
 just a narrowed viewBox rather than pixel arithmetic.
+
+The schematic is one A2 sheet. PDF is the primary form because it stays vector
+and a dense sheet reads at any zoom; the 300 dpi PNG is there for convenience.
+The PNG step is driven by the PDF's actual page count, so extra sheets would be
+exported as `schematic_p1.png`, `schematic_p2.png` rather than silently lost.
 
 3D renders need the 3D model packages, which the lite AppImage omits;
 `kienv.sh` points `KICAD10_3DMODEL_DIR` at a full KiCad extract when one is

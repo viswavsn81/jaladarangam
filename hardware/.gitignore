@@ -12,7 +12,5 @@ fp-info-cache
 *.kicad_pcb-bak
 _autosave-*
 
-# Intermediate renders. docs/*.pdf are the reviewable outputs and are tracked;
-# the PNG/SVG exports are throwaway and regenerate from them.
-docs/*.png
-docs/*.svg
+# review/ is the single home for reviewable renders and is tracked in full.
+# Intermediate SVG/PDF plots are written to a temp dir by make_review.sh.
